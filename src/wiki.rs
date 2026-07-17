@@ -19,6 +19,9 @@ pub struct WikiConfig {
     pub project_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit: Option<bool>,
+    /// Project commit the wiki was last synced to (set by `wookie ingest --mark`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ingest_commit: Option<String>,
 }
 
 pub struct Wiki {
@@ -223,6 +226,12 @@ impl Wiki {
             .filter(|p| p.id != id && p.links().iter().any(|l| l == id))
             .map(|p| p.id.clone())
             .collect()
+    }
+
+    pub fn save_config(&self) -> Result<()> {
+        let path = self.dir.join("wookie.toml");
+        fs::write(&path, toml::to_string_pretty(&self.config)?)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     fn git(&self, args: &[&str]) {

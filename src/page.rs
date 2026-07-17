@@ -16,6 +16,10 @@ pub struct Frontmatter {
     pub updated: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Project-relative paths (files or dir prefixes) this page documents.
+    /// `wookie ingest` uses these to map code changes to stale pages.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -84,13 +88,18 @@ impl Page {
                                 fm.status = Some(value.to_string());
                             }
                         }
-                        "tags" => {
+                        "tags" | "sources" => {
                             let inner = value.trim_start_matches('[').trim_end_matches(']');
-                            fm.tags = inner
+                            let items: Vec<String> = inner
                                 .split(',')
                                 .map(|t| t.trim().to_string())
                                 .filter(|t| !t.is_empty())
                                 .collect();
+                            if key.trim() == "tags" {
+                                fm.tags = items;
+                            } else {
+                                fm.sources = items;
+                            }
                         }
                         _ => {}
                     }
@@ -116,6 +125,9 @@ impl Page {
         s.push_str(&format!("updated: {}\n", self.fm.updated));
         if let Some(status) = &self.fm.status {
             s.push_str(&format!("status: {status}\n"));
+        }
+        if !self.fm.sources.is_empty() {
+            s.push_str(&format!("sources: [{}]\n", self.fm.sources.join(", ")));
         }
         s.push_str("---\n\n");
         s.push_str(self.body.trim_end());
@@ -178,6 +190,7 @@ mod tests {
                 created: "2026-07-17".into(),
                 updated: "2026-07-17".into(),
                 status: Some("stub".into()),
+                sources: vec!["src/retry.rs".into(), "src/backoff/".into()],
             },
             body: "Summary paragraph.\n\nMore detail with a [[scheduler]] link.".into(),
         };
@@ -187,6 +200,7 @@ mod tests {
         assert_eq!(parsed.fm.description, "How retries work");
         assert_eq!(parsed.fm.tags, vec!["core", "scheduler"]);
         assert_eq!(parsed.fm.status.as_deref(), Some("stub"));
+        assert_eq!(parsed.fm.sources, vec!["src/retry.rs", "src/backoff/"]);
         assert_eq!(parsed.body.trim(), p.body.trim());
     }
 

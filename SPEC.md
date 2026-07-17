@@ -71,10 +71,33 @@ Body. Links: [[scheduler]] or [[internals/retry-policy|display text]].
 
 init, list, toc, context, read, new, write (stdin body, `--append`), rm, mv
 (rewrites inbound links), expand, search (case-insensitive regex, `--tag`),
-links (out + back), doctor (`--fix` repairs frontmatter), obsidian (open the
-wiki's `pages/` as an Obsidian vault via `obsidian://open`; `--print` emits
-the URI instead), plugin install claude|codex, serve. Global flags: `--wiki`,
-`--json`. Errors always say what to run instead, because agents read errors.
+links (out + back), doctor (`--fix` repairs frontmatter; also flags when code
+moved past the last ingest), obsidian (open the wiki's `pages/` as an Obsidian
+vault: registers it in Obsidian's own obsidian.json, then launches
+`obsidian://open`; `--print` emits the URI, side-effect free), plugin install
+claude|codex, serve. Global flags: `--wiki`, `--json`. Errors always say what
+to run instead, because agents read errors.
+
+## Ingest: sync the wiki with the codebase
+
+wookie has no LLM inside, so ingest splits the work: wookie does the
+mechanical part and emits a hardcoded playbook the agent executes.
+
+- Fresh run (`wookie ingest --level quick|standard|deep`): inventories the
+  project (`git ls-files`, else a junk-filtered walk), seeds `code/<module>`
+  stubs (top-level dirs; standard/deep also submodules with >=3 files, capped)
+  each carrying `sources: [<dir>/]`, and prints the level's worklist —
+  quick: index + module overviews; standard: + submodules and 3-5 key flows;
+  deep: + per-file/type pages, invariants, edge cases.
+- `wookie ingest --mark`: records the project's HEAD in `wookie.toml`
+  (`last_ingest_commit`) once the agent finishes the worklist. Never
+  auto-marked, so an interrupted worklist resurfaces next run.
+- Update run (sync point exists): `git diff --name-only <last>..HEAD`, mapped
+  against every page's `sources` prefixes -> stale-page worklist, plus
+  uncovered changes and stubs for new top-level modules. `--full` re-ingests,
+  `--since <commit>` overrides the base.
+- Pages carry `sources: [paths]` frontmatter (set via `--sources` on
+  new/write) so any page, not just seeded ones, participates in staleness.
 
 ## MCP (`wookie serve`)
 

@@ -182,6 +182,87 @@ fn invalid_page_ids_rejected() {
 }
 
 #[test]
+fn ingest_fresh_then_update_lifecycle() {
+    let env = Env::new();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&env.project)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed");
+    };
+    let commit = |msg: &str| {
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg]);
+    };
+
+    // A small fake codebase.
+    git(&["init", "-q"]);
+    std::fs::create_dir_all(env.project.join("src/scheduler")).unwrap();
+    std::fs::create_dir_all(env.project.join("docs")).unwrap();
+    std::fs::write(env.project.join("README.md"), "# proj").unwrap();
+    for f in ["src/main.rs", "src/lib.rs", "src/scheduler/mod.rs", "src/scheduler/queue.rs", "src/scheduler/retry.rs", "docs/notes.md"] {
+        std::fs::write(env.project.join(f), "x").unwrap();
+    }
+    commit("init");
+
+    env.ok(&["init", "ingesty"], None);
+
+    // Fresh ingest seeds module stubs and prints the worklist.
+    let out = env.ok(&["ingest", "--level", "standard"], None);
+    assert!(out.contains("fresh"), "expected fresh mode: {out}");
+    assert!(out.contains("code/src"), "expected src stub: {out}");
+    assert!(out.contains("code/src/scheduler"), "expected submodule stub: {out}");
+    assert!(out.contains("README.md"), "expected entry points: {out}");
+    assert!(out.contains("ingest --mark"), "worklist should end with --mark: {out}");
+
+    // The seeded stub carries sources pointing at its directory.
+    let page = env.ok(&["read", "code/src/scheduler"], None);
+    assert!(page.contains("sources: [src/scheduler/]"), "stub sources missing: {page}");
+
+    // Mark, then confirm a no-change update reports in-sync.
+    env.ok(&["ingest", "--mark"], None);
+    let out = env.ok(&["ingest"], None);
+    assert!(out.contains("in sync"), "expected in-sync: {out}");
+
+    // Change a scheduler file; the scheduler page must go stale.
+    std::fs::write(env.project.join("src/scheduler/retry.rs"), "changed").unwrap();
+    commit("touch scheduler");
+    let out = env.ok(&["ingest"], None);
+    assert!(out.contains("update"), "expected update mode: {out}");
+    assert!(out.contains("code/src/scheduler"), "expected stale page: {out}");
+    assert!(out.contains("src/scheduler/retry.rs"), "expected changed file: {out}");
+
+    // Doctor also notices the wiki is behind the code.
+    let out = env.ok(&["doctor"], None);
+    assert!(out.contains("since last ingest"), "doctor should flag staleness: {out}");
+
+    // A brand-new top-level module gets seeded during update.
+    std::fs::create_dir_all(env.project.join("plugins")).unwrap();
+    std::fs::write(env.project.join("plugins/loader.rs"), "x").unwrap();
+    commit("add plugins");
+    let out = env.ok(&["ingest"], None);
+    assert!(out.contains("code/plugins"), "expected new module stub: {out}");
+}
+
+#[test]
+fn write_sets_sources() {
+    let env = Env::new();
+    env.ok(&["init", "srcy"], None);
+    env.ok(&["new", "concepts/auth", "--sources", "src/auth"], Some("Auth overview."));
+    let page = env.ok(&["read", "concepts/auth"], None);
+    assert!(page.contains("sources: [src/auth]"), "got: {page}");
+
+    env.ok(&["write", "concepts/auth", "--sources", "src/auth,src/session.rs"], Some("Updated overview."));
+    let page = env.ok(&["read", "concepts/auth"], None);
+    assert!(page.contains("sources: [src/auth, src/session.rs]"), "got: {page}");
+}
+
+#[test]
 fn obsidian_prepares_vault_and_prints_uri() {
     let env = Env::new();
     env.ok(&["init", "obsi"], None);

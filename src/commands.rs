@@ -79,6 +79,7 @@ pub fn init(
         description: description.clone(),
         project_roots: vec![project_root.clone()],
         auto_commit: None,
+        last_ingest_commit: None,
     };
     std::fs::write(dir.join("wookie.toml"), toml::to_string_pretty(&wiki_config)?)?;
 
@@ -102,6 +103,7 @@ pub fn init(
             created: today(),
             updated: today(),
             status: None,
+            sources: vec![],
         },
         body: format!(
             "Wiki for the project at {project_root}, managed by wookie.\n\n\
@@ -297,6 +299,7 @@ pub fn new_page(
     id: &str,
     title: Option<String>,
     tags: Vec<String>,
+    sources: Vec<String>,
     body: Option<String>,
     json: bool,
 ) -> Result<String> {
@@ -314,6 +317,7 @@ pub fn new_page(
             created: today(),
             updated: today(),
             status: if has_body { None } else { Some("stub".into()) },
+            sources,
         },
         body: body
             .filter(|b| !b.trim().is_empty())
@@ -345,7 +349,14 @@ fn first_sentence(text: &str) -> String {
     }
 }
 
-pub fn write(w: &Wiki, id: &str, body: &str, append: bool, json: bool) -> Result<String> {
+pub fn write(
+    w: &Wiki,
+    id: &str,
+    body: &str,
+    append: bool,
+    sources: Option<Vec<String>>,
+    json: bool,
+) -> Result<String> {
     if body.trim().is_empty() {
         bail!("empty body — pipe page content via stdin (e.g. wookie write {id} <<'EOF' ... EOF)");
     }
@@ -361,6 +372,9 @@ pub fn write(w: &Wiki, id: &str, body: &str, append: bool, json: bool) -> Result
     // Real content clears stub status; description follows the new summary if
     // it was still a placeholder.
     page.fm.status = None;
+    if let Some(sources) = sources {
+        page.fm.sources = sources;
+    }
     if page.fm.description.is_empty() || page.fm.description.starts_with("TODO") {
         page.fm.description = first_sentence(&page.summary());
     }
@@ -468,6 +482,7 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
                 created: today(),
                 updated: today(),
                 status: Some("stub".into()),
+                sources: vec![],
             },
             body: format!(
                 "TODO: fill in this page. It is linked from: {}.",
@@ -605,6 +620,413 @@ pub fn links(w: &Wiki, id: &str, json: bool) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
+pub enum IngestLevel {
+    /// Index + architecture overview + one page per top-level module
+    Quick,
+    /// Quick + significant submodules + key flows and concepts
+    Standard,
+    /// Standard + per-file/type pages, invariants, full cross-linking
+    Deep,
+}
+
+fn head_commit(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn changed_since(root: &Path, since: &str) -> Result<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only", since, "HEAD"])
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "cannot diff against '{since}' in {} — rerun with --full for a fresh ingest",
+            root.display()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Project files, relative paths. git ls-files when available (respects
+/// .gitignore), else a walk that skips hidden and well-known junk dirs.
+fn list_project_files(root: &Path) -> Vec<String> {
+    if let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files"])
+        .output()
+    {
+        if out.status.success() {
+            let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !files.is_empty() {
+                return files;
+            }
+        }
+    }
+    const JUNK: &[&str] = &[
+        "node_modules", "target", "dist", "build", "__pycache__", "venv", ".venv", "vendor",
+    ];
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            e.depth() == 0 || (!name.starts_with('.') && !JUNK.contains(&name.as_ref()))
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+        })
+        .collect()
+}
+
+/// The project root this wiki should ingest: the registered root containing
+/// cwd, else the first registered root.
+fn ingest_root(w: &Wiki, cwd: &Path) -> Result<PathBuf> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    for r in &w.config.project_roots {
+        let root = Path::new(r);
+        let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if cwd.starts_with(&canon) {
+            return Ok(canon);
+        }
+    }
+    match w.config.project_roots.first() {
+        Some(r) => Ok(PathBuf::from(r)),
+        None => bail!("wiki '{}' has no project_roots configured", w.slug),
+    }
+}
+
+fn code_page_id(dir: &str) -> String {
+    let segs: Vec<String> = dir.split('/').map(slugify).filter(|s| !s.is_empty()).collect();
+    format!("code/{}", segs.join("/"))
+}
+
+/// Group files by directory prefix at the given depth. Root-level files are
+/// excluded (they belong to the index/architecture pages).
+fn dirs_at_depth(files: &[String], depth: usize) -> BTreeMap<String, Vec<&String>> {
+    let mut map: BTreeMap<String, Vec<&String>> = BTreeMap::new();
+    for f in files {
+        let segs: Vec<&str> = f.split('/').collect();
+        if segs.len() > depth {
+            map.entry(segs[..depth].join("/")).or_default().push(f);
+        }
+    }
+    map
+}
+
+fn dir_stub_body(dir: &str, files: &[&String]) -> (String, String) {
+    let mut exts: BTreeMap<String, usize> = BTreeMap::new();
+    for f in files {
+        if let Some(ext) = Path::new(f.as_str()).extension().and_then(|e| e.to_str()) {
+            *exts.entry(format!(".{ext}")).or_default() += 1;
+        }
+    }
+    let mut exts: Vec<(String, usize)> = exts.into_iter().collect();
+    exts.sort_by(|a, b| b.1.cmp(&a.1));
+    let main_exts: Vec<String> = exts.into_iter().take(3).map(|(e, _)| e).collect();
+
+    let mut notable: Vec<&str> = files.iter().map(|f| f.as_str()).collect();
+    notable.sort_by_key(|f| (f.matches('/').count(), f.to_string()));
+    let notable: Vec<&str> = notable.into_iter().take(5).collect();
+
+    let description = format!("TODO: describe the {dir} module");
+    let body = format!(
+        "TODO: document `{dir}` — its role in the project, main entry points, and how it connects to other modules.\n\n\
+         {} files{}. Start from: {}.",
+        files.len(),
+        if main_exts.is_empty() {
+            String::new()
+        } else {
+            format!(" (mostly {})", main_exts.join(", "))
+        },
+        notable.join(", ")
+    );
+    (description, body)
+}
+
+fn seed_code_stub(w: &Wiki, dir: &str, files: &[&String]) -> Result<Option<String>> {
+    let id = code_page_id(dir);
+    if wiki::validate_id(&id).is_err() || w.exists(&id) {
+        return Ok(None);
+    }
+    let (description, body) = dir_stub_body(dir, files);
+    let mut stub = Page {
+        id: id.clone(),
+        fm: crate::page::Frontmatter {
+            title: humanize(&id),
+            description,
+            tags: vec!["code".into()],
+            created: today(),
+            updated: today(),
+            status: Some("stub".into()),
+            sources: vec![format!("{dir}/")],
+        },
+        body,
+    };
+    w.save_page(&mut stub, false)?;
+    Ok(Some(id))
+}
+
+pub fn ingest(
+    w: &mut Wiki,
+    cwd: &Path,
+    level: IngestLevel,
+    mark: bool,
+    full: bool,
+    since: Option<&str>,
+    json: bool,
+) -> Result<String> {
+    let root = ingest_root(w, cwd)?;
+
+    if mark {
+        let head = head_commit(&root).ok_or_else(|| {
+            anyhow::anyhow!("{} is not a git repo — --mark needs git history to diff against later", root.display())
+        })?;
+        w.config.last_ingest_commit = Some(head.clone());
+        w.save_config()?;
+        w.commit("wookie: ingest --mark");
+        if json {
+            return Ok(serde_json::json!({"marked": head}).to_string());
+        }
+        return Ok(format!("Marked wiki '{}' as synced to commit {}.", w.slug, &head[..8.min(head.len())]));
+    }
+
+    let base = since
+        .map(str::to_string)
+        .or_else(|| if full { None } else { w.config.last_ingest_commit.clone() });
+
+    match base {
+        Some(base) => ingest_update(w, &root, &base, level, json),
+        None => ingest_fresh(w, &root, level, json),
+    }
+}
+
+fn ingest_fresh(w: &Wiki, root: &Path, level: IngestLevel, json: bool) -> Result<String> {
+    let files = list_project_files(root);
+    if files.is_empty() {
+        bail!("no files found under {}", root.display());
+    }
+
+    // Entry points the agent should read first.
+    const ENTRY: &[&str] = &[
+        "README.md", "README.rst", "ARCHITECTURE.md", "CONTRIBUTING.md", "CLAUDE.md",
+        "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "Makefile", "docker-compose.yml",
+    ];
+    let entries: Vec<&str> = ENTRY.iter().copied().filter(|e| files.iter().any(|f| f == e)).collect();
+
+    // Seed stubs: top-level dirs always; significant second-level dirs for
+    // standard/deep. Capped so a monorepo doesn't explode into stubs.
+    let top = dirs_at_depth(&files, 1);
+    let mut targets: Vec<(String, Vec<&String>)> = {
+        let mut t: Vec<_> = top.into_iter().collect();
+        t.sort_by_key(|(_, fs)| std::cmp::Reverse(fs.len()));
+        t.truncate(15);
+        t
+    };
+    if level != IngestLevel::Quick {
+        let mut second: Vec<_> = dirs_at_depth(&files, 2)
+            .into_iter()
+            .filter(|(_, fs)| fs.len() >= 3)
+            .collect();
+        second.sort_by_key(|(_, fs)| std::cmp::Reverse(fs.len()));
+        second.truncate(25);
+        targets.extend(second);
+    }
+
+    let mut created = vec![];
+    for (dir, dir_files) in &targets {
+        if let Some(id) = seed_code_stub(w, dir, dir_files)? {
+            created.push(id);
+        }
+    }
+    if !created.is_empty() {
+        w.commit(&format!("wookie: ingest seed ({} stubs)", created.len()));
+    }
+
+    if json {
+        return Ok(serde_json::json!({
+            "mode": "fresh", "level": format!("{level:?}").to_lowercase(),
+            "root": root, "files": files.len(),
+            "entry_points": entries, "seeded": created,
+        })
+        .to_string());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Ingest ({:?}, fresh) — {} files under {}\n",
+        level,
+        files.len(),
+        root.display()
+    );
+    if created.is_empty() {
+        let _ = writeln!(out, "No new stubs seeded (module pages already exist).\n");
+    } else {
+        let _ = writeln!(out, "Seeded {} module stub(s):", created.len());
+        for c in &created {
+            let _ = writeln!(out, "- {c}");
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "Worklist — do these now:");
+    let _ = writeln!(
+        out,
+        "1. Read the entry points: {}.",
+        if entries.is_empty() { "(none found — skim the file tree)".into() } else { entries.join(", ") }
+    );
+    let _ = writeln!(
+        out,
+        "2. Write 'index': what the project is and how it is laid out. Link every code/* page."
+    );
+    let _ = writeln!(
+        out,
+        "3. Fill each seeded stub: read the module's key files, then pipe a body with `wookie write <id>`."
+    );
+    match level {
+        IngestLevel::Quick => {}
+        IngestLevel::Standard => {
+            let _ = writeln!(
+                out,
+                "4. Document the 3-5 most important flows/concepts as their own pages (e.g. request lifecycle, config loading). Link them with [[wikilinks]], then run `wookie expand` and fill what it stubs."
+            );
+        }
+        IngestLevel::Deep => {
+            let _ = writeln!(
+                out,
+                "4. Document every significant flow/concept as its own page; link them with [[wikilinks]], then run `wookie expand` and fill what it stubs."
+            );
+            let _ = writeln!(
+                out,
+                "5. For each key file or type inside a module, add a sub-page under the module's code/ path (set --sources to the file). Capture invariants, gotchas and edge cases, not just structure."
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "{}. Run `wookie doctor`, fix what it reports, then record the sync point: `wookie ingest --mark`.",
+        match level { IngestLevel::Quick => 4, IngestLevel::Standard => 5, IngestLevel::Deep => 6 }
+    );
+    let _ = write!(
+        out,
+        "\nConventions: every page's first paragraph is a standalone summary; set `--sources` to the paths a page documents so future ingests can flag it when that code changes."
+    );
+    Ok(out.trim_end().to_string())
+}
+
+fn ingest_update(w: &Wiki, root: &Path, base: &str, level: IngestLevel, json: bool) -> Result<String> {
+    let changed = changed_since(root, base)?;
+    if changed.is_empty() {
+        let msg = format!("No code changes since {} — wiki is in sync.", &base[..8.min(base.len())]);
+        if json {
+            return Ok(serde_json::json!({"mode": "update", "changed": [], "stale": []}).to_string());
+        }
+        return Ok(msg);
+    }
+
+    // Map changed files onto pages via their sources prefixes.
+    let mut stale: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut covered: HashSet<&String> = HashSet::new();
+    for p in w.all_pages() {
+        for src in &p.fm.sources {
+            let prefix = src.trim_end_matches('/');
+            for f in &changed {
+                if f == prefix || f.starts_with(&format!("{prefix}/")) {
+                    stale.entry(p.id.clone()).or_default().push(f.clone());
+                    covered.insert(f);
+                }
+            }
+        }
+    }
+    let uncovered: Vec<&String> = changed.iter().filter(|f| !covered.contains(f)).collect();
+
+    // New top-level modules that appeared since last ingest get stubs.
+    let all_files = list_project_files(root);
+    let mut seeded = vec![];
+    for (dir, dir_files) in dirs_at_depth(&all_files, 1) {
+        if uncovered.iter().any(|f| f.starts_with(&format!("{dir}/"))) {
+            if let Some(id) = seed_code_stub(w, &dir, &dir_files)? {
+                seeded.push(id);
+            }
+        }
+    }
+    if !seeded.is_empty() {
+        w.commit(&format!("wookie: ingest seed ({} stubs)", seeded.len()));
+    }
+
+    if json {
+        return Ok(serde_json::json!({
+            "mode": "update", "since": base, "changed": changed,
+            "stale": stale.iter().map(|(id, fs)| serde_json::json!({"id": id, "files": fs})).collect::<Vec<_>>(),
+            "uncovered": uncovered, "seeded": seeded,
+        })
+        .to_string());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Ingest ({:?}, update) — {} file(s) changed since {}\n",
+        level,
+        changed.len(),
+        &base[..8.min(base.len())]
+    );
+    if stale.is_empty() {
+        let _ = writeln!(out, "No existing pages claim the changed files via sources.");
+    } else {
+        let _ = writeln!(out, "Stale pages (their sources changed):");
+        for (id, fs) in &stale {
+            let mut fs = fs.clone();
+            fs.sort();
+            fs.dedup();
+            let shown = fs.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+            let more = if fs.len() > 6 { format!(" (+{} more)", fs.len() - 6) } else { String::new() };
+            let _ = writeln!(out, "- {id}  <- {shown}{more}");
+        }
+    }
+    if !seeded.is_empty() {
+        let _ = writeln!(out, "\nNew module stub(s) seeded:");
+        for s in &seeded {
+            let _ = writeln!(out, "- {s}");
+        }
+    }
+    if !uncovered.is_empty() {
+        let shown = uncovered.iter().take(10).map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+        let more = if uncovered.len() > 10 { format!(" (+{} more)", uncovered.len() - 10) } else { String::new() };
+        let _ = writeln!(
+            out,
+            "\nChanged but not covered by any page's sources: {shown}{more}\nIf any deserve documentation, add pages for them (with --sources)."
+        );
+    }
+    let _ = write!(
+        out,
+        "\nWorklist — do these now:\n1. For each stale page: `wookie read <id>`, review the changed files (git diff {base} -- <files>), update the page with `wookie write <id>`.\n2. Fill any seeded stubs.\n3. Run `wookie doctor`, then record the new sync point: `wookie ingest --mark`.",
+    );
+    Ok(out.trim_end().to_string())
+}
+
 fn percent_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -616,12 +1038,62 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
+fn obsidian_app_config() -> PathBuf {
+    let home = crate::config::user_home();
+    #[cfg(target_os = "macos")]
+    return home.join("Library/Application Support/obsidian/obsidian.json");
+    #[cfg(target_os = "linux")]
+    return home.join(".config/obsidian/obsidian.json");
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return home.join(".obsidian/obsidian.json");
+}
+
+fn fnv1a_hex(s: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Obsidian only opens vaults listed in its own obsidian.json, so an
+/// unregistered folder gives "vault not found". Register ours there.
+/// Returns true if it was newly registered.
+fn register_obsidian_vault(vault: &Path) -> Result<bool> {
+    let cfg_path = obsidian_app_config();
+    let raw = std::fs::read_to_string(&cfg_path).unwrap_or_else(|_| "{}".into());
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    if !cfg.is_object() {
+        cfg = serde_json::json!({});
+    }
+    let obj = cfg.as_object_mut().unwrap();
+    if !obj.get("vaults").map(|v| v.is_object()).unwrap_or(false) {
+        obj.insert("vaults".into(), serde_json::json!({}));
+    }
+    let target = vault.to_string_lossy().to_string();
+    let vaults = obj["vaults"].as_object_mut().unwrap();
+    if vaults.values().any(|e| e.get("path").and_then(|p| p.as_str()) == Some(target.as_str())) {
+        return Ok(false);
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    vaults.insert(fnv1a_hex(&target), serde_json::json!({ "path": target, "ts": ts }));
+    if let Some(parent) = cfg_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg)?)?;
+    Ok(true)
+}
+
 /// Open the wiki's pages/ folder as an Obsidian vault.
 pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
-    let vault = w.pages_dir();
-    // A .obsidian dir marks the folder as a vault so Obsidian opens it
-    // without an "open folder as vault" detour. Its contents stay out of
-    // wiki history via .gitignore.
+    let vault = w.pages_dir().canonicalize().unwrap_or_else(|_| w.pages_dir());
+    // A .obsidian dir holds the vault's local settings; keep it out of wiki
+    // history via .gitignore.
     std::fs::create_dir_all(vault.join(".obsidian"))?;
     let gitignore = w.dir.join(".gitignore");
     if !gitignore.exists() {
@@ -639,6 +1111,9 @@ pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
         return Ok(uri);
     }
 
+    // Only when actually opening: --print stays side-effect free.
+    let newly_registered = register_obsidian_vault(&vault).unwrap_or(false);
+
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(target_os = "linux")]
@@ -648,7 +1123,15 @@ pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
 
     let status = std::process::Command::new(opener).arg(&uri).status();
     match status {
-        Ok(s) if s.success() => Ok(format!("Opened wiki '{}' in Obsidian: {}", w.slug, vault.display())),
+        Ok(s) if s.success() => {
+            let mut out = format!("Opened wiki '{}' in Obsidian: {}", w.slug, vault.display());
+            if newly_registered {
+                out.push_str(
+                    "\nRegistered the vault with Obsidian. If Obsidian was already running and shows 'vault not found', quit and reopen it once.",
+                );
+            }
+            Ok(out)
+        }
         _ => bail!("could not launch Obsidian — open this URI manually: {uri}"),
     }
 }
@@ -686,6 +1169,15 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
         }
         if p.id != "index" && !linked.contains(&p.id) {
             issues.push(format!("orphan (no page links to it): '{}'", p.id));
+        }
+    }
+    if let (Some(last), Some(root)) = (&w.config.last_ingest_commit, w.config.project_roots.first()) {
+        if let Some(head) = head_commit(Path::new(root)) {
+            if &head != last {
+                issues.push(
+                    "code changed since last ingest — run `wookie ingest` for a stale-page worklist".into(),
+                );
+            }
         }
     }
     if !fixed.is_empty() {

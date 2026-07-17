@@ -36,6 +36,15 @@ summary, and `[[wikilinks]]` between pages. Links inside code spans are
 ignored. Broken links are not errors: `wookie expand` turns them into stub
 pages, which is how the wiki grows.
 
+`wookie ingest` keeps the wiki synced with the code. The first run inventories
+the project, seeds `code/<module>` stubs and prints a documentation worklist
+at the chosen intensity (`quick`: index + module overviews; `standard`: +
+submodules and key flows; `deep`: + per-file pages and invariants). wookie
+does the mechanical part; the LLM executes the worklist, then runs
+`wookie ingest --mark` to record the sync commit. Later runs diff the code
+since that commit and map changed files to stale pages via each page's
+`sources` frontmatter.
+
 ## Commands
 
 ```
@@ -48,6 +57,8 @@ wookie new <id> [--title --tags]  create page, body from stdin
 wookie write <id> [--append]   replace/append body from stdin, clears stub
 wookie rm <id> / mv <old> <new>  delete / rename (inbound links rewritten)
 wookie expand [<id>]           stub out broken links, print fill-in worklist
+wookie ingest [--level L]      sync wiki with the codebase (quick|standard|deep)
+wookie ingest --mark           record the current commit as the sync point
 wookie search <query> [--tag]  regex search over ids/titles/tags/bodies
 wookie links <id>              outlinks + backlinks
 wookie doctor [--fix]          health check

@@ -29,6 +29,7 @@ wookie write <id> <<'EOF' ...  # replace a page's body (also clears stub status)
 wookie write <id> --append     # append instead of replace
 wookie expand [<id>]           # create stubs for broken [[links]], print worklist
 wookie mv <old> <new>          # rename; inbound links rewritten automatically
+wookie ingest [--level L]      # sync wiki with codebase (see below)
 wookie doctor [--fix]          # health check: broken links, orphans, stubs
 wookie list / wookie init      # all wikis / register a new one for this project
 ```
@@ -46,6 +47,26 @@ machine-readable output.
   without the rest of the page (it is what `--expand` shows other readers).
 - Never edit frontmatter timestamps or files under `~/.wookie` directly; go
   through wookie commands so history and metadata stay correct.
+
+## Syncing with the codebase (the ingest workflow)
+
+`wookie ingest` keeps the wiki tracking the code. When the user asks to
+"ingest", "index", or "document the codebase", or when doctor reports the code
+has changed since the last ingest, run it and then EXECUTE the worklist it
+prints — the command only scaffolds; you do the reading and writing.
+
+- First run: `wookie ingest --level quick|standard|deep`. It inventories the
+  project, seeds `code/<module>` stubs (with `sources` pointing at their
+  directories), and prints a worklist. quick = index + module overviews;
+  standard (default) = + submodules and key flows; deep = + per-file/type
+  pages, invariants, edge cases.
+- Later runs: `wookie ingest` diffs the code since the recorded sync point and
+  lists stale pages (whose `sources` changed), uncovered changes, and new
+  modules. Update each stale page after reviewing the diff.
+- When you finish a worklist: `wookie ingest --mark` records the current
+  commit as the sync point. Do not mark before the work is done.
+- When writing pages about code, set `--sources src/path,other/path` so
+  future ingests can flag the page when that code changes.
 
 ## Growing the wiki (the expand workflow)
 

@@ -121,6 +121,7 @@ fn tool_defs() -> Vec<Value> {
                 "id": { "type": "string" },
                 "title": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
+                "sources": { "type": "array", "items": { "type": "string" }, "description": "Project-relative paths this page documents (used by ingest to detect staleness)." },
                 "body": { "type": "string" },
             }))),
         }),
@@ -131,6 +132,17 @@ fn tool_defs() -> Vec<Value> {
                 "id": { "type": "string" },
                 "body": { "type": "string" },
                 "append": { "type": "boolean" },
+                "sources": { "type": "array", "items": { "type": "string" }, "description": "Replace the page's documented project paths." },
+            }))),
+        }),
+        json!({
+            "name": "ingest",
+            "description": "Sync the wiki with the codebase. First run: inventories the project, seeds module stubs, returns a documentation worklist at the chosen level (quick|standard|deep). Later runs: diffs the code since the recorded sync point and returns stale pages. Call with mark=true after completing a worklist.",
+            "inputSchema": schema(&[], wiki_props(json!({
+                "level": { "type": "string", "enum": ["quick", "standard", "deep"] },
+                "mark": { "type": "boolean", "description": "Record the current project commit as the sync point." },
+                "full": { "type": "boolean", "description": "Force a fresh ingest even if a sync point exists." },
+                "since": { "type": "string", "description": "Diff against this commit instead of the recorded sync point." },
             }))),
         }),
         json!({
@@ -195,16 +207,39 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             commands::read(&resolve()?, &require("id")?, expand, false)
         }
         "page_new" => {
-            let tags = args
-                .get("tags")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                .unwrap_or_default();
-            commands::new_page(&resolve()?, &require("id")?, str_arg("title"), tags, str_arg("body"), false)
+            let list_arg = |k: &str| -> Vec<String> {
+                args.get(k)
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default()
+            };
+            commands::new_page(
+                &resolve()?,
+                &require("id")?,
+                str_arg("title"),
+                list_arg("tags"),
+                list_arg("sources"),
+                str_arg("body"),
+                false,
+            )
         }
         "page_write" => {
             let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
-            commands::write(&resolve()?, &require("id")?, &require("body")?, append, false)
+            let sources = args.get("sources").and_then(Value::as_array).map(|a| {
+                a.iter().filter_map(Value::as_str).map(str::to_string).collect()
+            });
+            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, false)
+        }
+        "ingest" => {
+            let level = match str_arg("level").as_deref() {
+                Some("quick") => commands::IngestLevel::Quick,
+                Some("deep") => commands::IngestLevel::Deep,
+                _ => commands::IngestLevel::Standard,
+            };
+            let mark = args.get("mark").and_then(Value::as_bool).unwrap_or(false);
+            let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+            let mut w = resolve()?;
+            commands::ingest(&mut w, &cwd, level, mark, full, str_arg("since").as_deref(), false)
         }
         "page_move" => commands::mv(&resolve()?, &require("from")?, &require("to")?, false),
         "page_remove" => commands::rm(&resolve()?, &require("id")?, false),

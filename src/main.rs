@@ -59,6 +59,9 @@ enum Cmd {
         /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
+        /// Comma-separated project paths this page documents (used by ingest)
+        #[arg(long)]
+        sources: Option<String>,
     },
     /// Replace a page's body from stdin (clears stub status)
     Write {
@@ -66,6 +69,9 @@ enum Cmd {
         /// Append to the body instead of replacing it
         #[arg(long)]
         append: bool,
+        /// Comma-separated project paths this page documents (used by ingest)
+        #[arg(long)]
+        sources: Option<String>,
     },
     /// Delete a page
     Rm { id: String },
@@ -73,6 +79,22 @@ enum Cmd {
     Mv { old: String, new: String },
     /// Create stubs for broken [[wikilinks]] and print the fill-in worklist
     Expand { id: Option<String> },
+    /// Ingest the codebase: seed module stubs and emit a documentation
+    /// worklist; on later runs, map code changes to stale pages
+    Ingest {
+        /// How thorough the documentation pass should be
+        #[arg(long, value_enum, default_value = "standard")]
+        level: commands::IngestLevel,
+        /// Record the current project commit as the wiki's sync point
+        #[arg(long)]
+        mark: bool,
+        /// Force a fresh ingest even if a sync point exists
+        #[arg(long)]
+        full: bool,
+        /// Diff against this commit instead of the recorded sync point
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Search ids, titles, tags and bodies (case-insensitive regex)
     Search {
         query: String,
@@ -112,6 +134,15 @@ enum PluginCmd {
     },
 }
 
+fn split_csv(v: Option<String>) -> Option<Vec<String>> {
+    v.map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
 fn stdin_body() -> Option<String> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -148,19 +179,28 @@ fn run() -> Result<()> {
         Cmd::Toc => commands::toc(&resolve()?, json)?,
         Cmd::Context => commands::context(&resolve()?, json)?,
         Cmd::Read { id, expand } => commands::read(&resolve()?, &id, expand.unwrap_or(0), json)?,
-        Cmd::New { id, title, tags } => {
-            let tags = tags
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-                .unwrap_or_default();
-            commands::new_page(&resolve()?, &id, title, tags, stdin_body(), json)?
+        Cmd::New { id, title, tags, sources } => {
+            commands::new_page(
+                &resolve()?,
+                &id,
+                title,
+                split_csv(tags).unwrap_or_default(),
+                split_csv(sources).unwrap_or_default(),
+                stdin_body(),
+                json,
+            )?
         }
-        Cmd::Write { id, append } => {
+        Cmd::Write { id, append, sources } => {
             let body = stdin_body().unwrap_or_default();
-            commands::write(&resolve()?, &id, &body, append, json)?
+            commands::write(&resolve()?, &id, &body, append, split_csv(sources), json)?
         }
         Cmd::Rm { id } => commands::rm(&resolve()?, &id, json)?,
         Cmd::Mv { old, new } => commands::mv(&resolve()?, &old, &new, json)?,
         Cmd::Expand { id } => commands::expand(&resolve()?, id.as_deref(), json)?,
+        Cmd::Ingest { level, mark, full, since } => {
+            let mut w = resolve()?;
+            commands::ingest(&mut w, &cwd, level, mark, full, since.as_deref(), json)?
+        }
         Cmd::Search { query, tag } => commands::search(&resolve()?, &query, tag.as_deref(), json)?,
         Cmd::Links { id } => commands::links(&resolve()?, &id, json)?,
         Cmd::Doctor { fix } => commands::doctor(&resolve()?, fix, json)?,

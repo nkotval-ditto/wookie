@@ -113,6 +113,31 @@ enum Cmd {
     },
     /// Outlinks and backlinks of a page
     Links { id: String },
+    /// Emit a critique briefing: check the current changes against every
+    /// rules section (the invoking agent executes it)
+    Critique {
+        /// Only this rules section
+        #[arg(long)]
+        section: Option<String>,
+        /// Critique changes since this ref instead of uncommitted changes
+        #[arg(long)]
+        since: Option<String>,
+        /// Critique staged changes
+        #[arg(long, conflicts_with = "since")]
+        staged: bool,
+        /// Critique explicit paths instead of a git diff
+        #[arg(long, num_args = 1..)]
+        paths: Vec<String>,
+    },
+    /// Temporarily unlock a locked section (requires explicit user permission)
+    Unlock {
+        section: String,
+        /// Minutes until it relocks automatically
+        #[arg(long, default_value = "15")]
+        minutes: u64,
+    },
+    /// Relock a section immediately
+    Lock { section: String },
     /// Health check: broken links, orphans, stubs, missing summaries
     Doctor {
         /// Mechanically repair frontmatter issues
@@ -214,6 +239,23 @@ fn run() -> Result<()> {
         }
         Cmd::Search { query, tag } => commands::search(&resolve()?, &query, tag.as_deref(), json)?,
         Cmd::Links { id } => commands::links(&resolve()?, &id, json)?,
+        Cmd::Critique { section, since, staged, paths } => commands::critique(
+            &resolve()?,
+            &cwd,
+            section.as_deref(),
+            since.as_deref(),
+            staged,
+            &paths,
+            json,
+        )?,
+        Cmd::Unlock { section, minutes } => {
+            let mut w = resolve()?;
+            commands::unlock(&mut w, &section, minutes, json)?
+        }
+        Cmd::Lock { section } => {
+            let mut w = resolve()?;
+            commands::lock(&mut w, &section, json)?
+        }
         Cmd::Doctor { fix } => commands::doctor(&resolve()?, fix, json)?,
         Cmd::Obsidian { print } => commands::obsidian(&resolve()?, print, json)?,
         Cmd::Plugin { cmd: PluginCmd::Install { target } } => plugins::install(target)?,

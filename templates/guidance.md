@@ -30,7 +30,9 @@ wookie write <id> --append     # append instead of replace
 wookie expand [<id>]           # create stubs for broken [[links]], print worklist
 wookie mv <old> <new>          # rename; inbound links rewritten automatically
 wookie ingest [--level L]      # sync wiki with codebase (see below)
+wookie critique [--since ref]  # check current changes against the rules sections
 wookie doctor [--fix]          # health check: broken links, orphans, stubs
+wookie unlock <section>        # ONLY with explicit user permission (see below)
 wookie list / wookie init      # all wikis / register a new one for this project
 ```
 
@@ -51,6 +53,29 @@ context` shows the wiki's actual set, configurable in its wookie.toml):
 - `workflow/` — how to commit, branch, PR, review, release; process rules
 
 Unfiled pages are allowed but flagged by doctor.
+
+Sections come in two kinds. `info` sections hold descriptive knowledge.
+`rules` sections (by default `style/` and `workflow/`) hold normative,
+checkable content and behave differently:
+
+- They are LOCKED (see below), so rules don't drift when code gets documented.
+- Each needs a `<section>/checks` page telling a reviewer how to verify the
+  rules: Scope (what artifacts they apply to), Procedure (commands to run,
+  what to inspect), Violations (what bad looks like), Exceptions.
+- `wookie critique` checks work against them. Run it before committing or
+  opening a PR: it returns a briefing (rules + checks pages + the changed
+  files) that YOU then execute, reporting violations per its output contract.
+
+## Locked sections: ask before you touch
+
+Rules sections are locked. Any new/write/rm/mv into one fails until unlocked.
+The rule is absolute: NEVER run `wookie unlock <section>` unless the user has
+explicitly approved changing that section's content in the current
+conversation. Documenting code, filling stubs, or fixing doctor findings is
+NOT permission to edit rules. When you believe a rule page needs changing,
+propose the edit to the user and wait. After approval: `wookie unlock
+<section>`, make the edit, then `wookie lock <section>` (it also auto-relocks
+after 15 minutes).
 
 ## Pinned pages (always-on instructions)
 

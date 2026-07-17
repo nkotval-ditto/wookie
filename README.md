@@ -38,7 +38,11 @@ pages, which is how the wiki grows.
 
 Pages are filed under sections: top-level namespaces declared in each
 `wookie.toml` (defaults: `architecture/`, `code/`, `decisions/`, `guides/`,
-`style/`, `workflow/`). `toc` and `context` group by section, unfiled pages
+`style/`, `workflow/`). Sections are `info` or `rules`: rules sections
+(style, workflow) are checkable via `wookie critique`, need a
+`<section>/checks` page saying how to verify them, and are locked, so agents
+must get explicit user permission (then `wookie unlock`) before changing
+rules; unlocks auto-expire. `toc` and `context` group by section, unfiled pages
 are doctor findings, and sections can require pages (`architecture/overview`
 by default). Pages carrying `pin: true` (via `--pin`) are always-on
 instructions: `context` inlines their full bodies, so commit/PR rules and
@@ -70,6 +74,8 @@ wookie ingest [--level L]      sync wiki with the codebase (quick|standard|deep)
 wookie ingest --mark           record the current commit as the sync point
 wookie search <query> [--tag]  regex search over ids/titles/tags/bodies
 wookie links <id>              outlinks + backlinks
+wookie critique [--since ref]  briefing to check changes against rules sections
+wookie unlock/lock <section>   temporary write access to a locked section
 wookie doctor [--fix]          health check
 wookie obsidian [--print]      open the wiki as an Obsidian vault
 wookie plugin install claude|codex

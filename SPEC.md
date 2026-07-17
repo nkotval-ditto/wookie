@@ -92,6 +92,30 @@ conventions with warnings, not walls:
   missing required pages; `index` is exempt
 - ingest worklists reference sections (missing required pages become step 2)
 
+## Section kinds, critique, and locks
+
+Sections have a `kind`: `info` (default; descriptive) or `rules` (normative;
+default for style and workflow). Rules sections get three behaviors:
+
+- Checks page: each rules section needs `<section>/checks` describing how to
+  verify its rules (scope, procedure, violations, exceptions). Doctor flags
+  its absence; critique falls back to judgment and says so.
+- `wookie critique [--section s] [--since ref] [--staged] [--paths ...]`:
+  assembles a briefing (target files from git or explicit paths, each rules
+  section's checks page + rule page bodies, and an output contract:
+  severity | rule id | file:line | problem | fix, verdict per section). The
+  agent executes the briefing; wookie only gathers. Read-only, never a gate.
+- Locks: rules sections are locked by default (`locked` overrides per
+  section). Mutations (new/write/rm/mv, expand stubs) into a locked section
+  fail with instructions to get user permission. `wookie unlock <section>
+  [--minutes N]` (default 15) opens a temporary window recorded in
+  wookie.toml `[unlocks]` with an RFC3339 expiry; `wookie lock` relocks
+  early. Enforcement is layered: hard failure in the tool, a distinct unlock
+  command the harness's permission prompt surfaces to the human, guidance
+  that forbids unprompted unlocking, and auto-expiry against dangling
+  unlocks. wookie cannot verify consent itself; the layers make silent rule
+  drift require deliberately ignoring all of them.
+
 ## Pinned pages: always-on vs on-demand
 
 `pin: true` frontmatter (set via `--pin`/`--unpin` on new/write) marks a page

@@ -181,6 +181,29 @@ fn tool_defs() -> Vec<Value> {
             "inputSchema": schema(&["id"], wiki_props(json!({ "id": { "type": "string" } }))),
         }),
         json!({
+            "name": "critique",
+            "description": "Get a critique briefing: the project's rules sections (each with its checks page) plus the current changes to check them against. EXECUTE the briefing it returns and report violations per its output contract.",
+            "inputSchema": schema(&[], wiki_props(json!({
+                "section": { "type": "string", "description": "Only this rules section." },
+                "since": { "type": "string", "description": "Critique changes since this git ref instead of uncommitted changes." },
+                "staged": { "type": "boolean", "description": "Critique staged changes." },
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Critique explicit paths instead of a git diff." },
+            }))),
+        }),
+        json!({
+            "name": "unlock_section",
+            "description": "Temporarily unlock a locked (rules) section so its pages can be edited. NEVER call this without the user's explicit permission in the current conversation. Relocks automatically.",
+            "inputSchema": schema(&["section"], wiki_props(json!({
+                "section": { "type": "string" },
+                "minutes": { "type": "integer", "description": "Minutes until auto-relock (default 15)." },
+            }))),
+        }),
+        json!({
+            "name": "lock_section",
+            "description": "Relock a section immediately after finishing approved edits.",
+            "inputSchema": schema(&["section"], wiki_props(json!({ "section": { "type": "string" } }))),
+        }),
+        json!({
             "name": "doctor",
             "description": "Wiki health check: broken links, orphans, stubs, missing summaries. fix=true repairs frontmatter mechanically.",
             "inputSchema": schema(&[], wiki_props(json!({ "fix": { "type": "boolean" } }))),
@@ -250,6 +273,32 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
         "wiki_expand" => commands::expand(&resolve()?, str_arg("id").as_deref(), false),
         "search" => commands::search(&resolve()?, &require("query")?, str_arg("tag").as_deref(), false),
         "links" => commands::links(&resolve()?, &require("id")?, false),
+        "critique" => {
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            let staged = args.get("staged").and_then(Value::as_bool).unwrap_or(false);
+            commands::critique(
+                &resolve()?,
+                &cwd,
+                str_arg("section").as_deref(),
+                str_arg("since").as_deref(),
+                staged,
+                &paths,
+                false,
+            )
+        }
+        "unlock_section" => {
+            let minutes = args.get("minutes").and_then(Value::as_u64).unwrap_or(15);
+            let mut w = resolve()?;
+            commands::unlock(&mut w, &require("section")?, minutes, false)
+        }
+        "lock_section" => {
+            let mut w = resolve()?;
+            commands::lock(&mut w, &require("section")?, false)
+        }
         "doctor" => {
             let fix = args.get("fix").and_then(Value::as_bool).unwrap_or(false);
             commands::doctor(&resolve()?, fix, false)

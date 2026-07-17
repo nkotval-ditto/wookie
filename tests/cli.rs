@@ -272,7 +272,7 @@ fn sections_group_toc_and_flag_unfiled() {
 
     let toc = env.ok(&["toc"], None);
     assert!(toc.contains("architecture/ —"), "expected section header: {toc}");
-    assert!(toc.contains("workflow/ —"), "expected workflow section: {toc}");
+    assert!(toc.contains("workflow/ [rules, locked] —"), "expected workflow flags: {toc}");
     assert!(toc.contains("unfiled"), "expected unfiled group: {toc}");
 
     let out = env.ok(&["doctor"], None);
@@ -294,9 +294,77 @@ fn doctor_requires_section_required_pages() {
 }
 
 #[test]
+fn locked_sections_block_until_unlocked() {
+    let env = Env::new();
+    env.ok(&["init", "locky"], None);
+
+    // Rules sections are locked by default.
+    let (success, _, stderr) = env.run(&["new", "style/naming"], Some("Use snake_case."));
+    assert!(!success);
+    assert!(stderr.contains("locked"), "expected lock error: {stderr}");
+    assert!(stderr.contains("ask the user"), "error should instruct asking: {stderr}");
+
+    // Unlock, write, relock, blocked again.
+    env.ok(&["unlock", "style"], None);
+    env.ok(&["new", "style/naming"], Some("Use snake_case."));
+    env.ok(&["lock", "style"], None);
+    let (success, _, stderr) = env.run(&["write", "style/naming"], Some("Changed."));
+    assert!(!success, "relock should block writes: {stderr}");
+
+    // Info sections are never locked.
+    env.ok(&["new", "guides/build"], Some("Run cargo build."));
+
+    // Expand skips stubs that would land in locked sections.
+    env.ok(&["new", "guides/deploy"], Some("See [[style/imports]] first."));
+    let out = env.ok(&["expand"], None);
+    assert!(out.contains("Skipped"), "expand should skip locked targets: {out}");
+    let (created, _, _) = env.run(&["read", "style/imports"], None);
+    assert!(!created, "stub must not be created in a locked section");
+}
+
+#[test]
+fn critique_briefing_includes_rules_and_target() {
+    let env = Env::new();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&env.project)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    std::fs::write(env.project.join("main.rs"), "fn main() {}").unwrap();
+    git(&["add", "-A"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+
+    env.ok(&["init", "crity"], None);
+    env.ok(&["unlock", "style"], None);
+    env.ok(
+        &["new", "style/checks"],
+        Some("Look at every changed .rs file and check naming of new functions."),
+    );
+    env.ok(&["new", "style/naming"], Some("Functions are snake_case, no abbreviations."));
+
+    // An uncommitted change is the default target.
+    std::fs::write(env.project.join("main.rs"), "fn main() { let x = 1; }").unwrap();
+
+    let out = env.ok(&["critique"], None);
+    assert!(out.contains("main.rs"), "target file missing: {out}");
+    assert!(out.contains("How to verify (style/checks)"), "checks page missing: {out}");
+    assert!(out.contains("snake_case, no abbreviations"), "rule body missing: {out}");
+    assert!(out.contains("Output contract"), "contract missing: {out}");
+    assert!(out.contains("workflow/checks page") || out.contains("no workflow/checks"),
+        "workflow section without checks should be noted: {out}");
+}
+
+#[test]
 fn pinned_pages_inline_in_context() {
     let env = Env::new();
     env.ok(&["init", "pinny"], None);
+    env.ok(&["unlock", "workflow"], None);
     env.ok(
         &["new", "workflow/commits", "--pin"],
         Some("Always use conventional commits.\n\nScope tags come from the module name."),

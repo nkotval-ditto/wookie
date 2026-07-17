@@ -81,6 +81,7 @@ pub fn init(
         auto_commit: None,
         last_ingest_commit: None,
         sections: wiki::default_sections(),
+        unlocks: Default::default(),
     };
     std::fs::write(dir.join("wookie.toml"), toml::to_string_pretty(&wiki_config)?)?;
 
@@ -218,7 +219,19 @@ fn render_grouped(w: &Wiki, out: &mut String) {
         let _ = writeln!(out, "\n- {id} — {desc}");
     }
     for (name, cfg, pages) in &grouped {
-        let _ = writeln!(out, "\n{name}/ — {}", cfg.description);
+        let mut flags = vec![];
+        if cfg.kind == wiki::SectionKind::Rules {
+            flags.push("rules".to_string());
+        }
+        if cfg.is_locked() {
+            flags.push(if w.is_unlocked(name) {
+                "temporarily unlocked".to_string()
+            } else {
+                "locked".to_string()
+            });
+        }
+        let flags = if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(", ")) };
+        let _ = writeln!(out, "\n{name}/{flags} — {}", cfg.description);
         if pages.is_empty() {
             let _ = writeln!(out, "  (no pages yet)");
         }
@@ -243,6 +256,8 @@ fn grouped_json(w: &Wiki) -> serde_json::Value {
         "sections": grouped.iter().map(|(name, cfg, pages)| serde_json::json!({
             "name": name,
             "description": cfg.description,
+            "kind": if cfg.kind == wiki::SectionKind::Rules { "rules" } else { "info" },
+            "locked": cfg.is_locked(),
             "required": cfg.required,
             "pages": pages.iter().map(|(id, d, stub)| serde_json::json!({"id": id, "description": d, "stub": stub})).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -373,6 +388,7 @@ pub fn new_page(
     json: bool,
 ) -> Result<String> {
     wiki::validate_id(id)?;
+    w.assert_writable(id)?;
     if w.exists(id) {
         bail!("page '{id}' already exists — use `wookie write {id}` to replace its body");
     }
@@ -439,6 +455,7 @@ pub fn write(
     if body.trim().is_empty() {
         bail!("empty body — pipe page content via stdin (e.g. wookie write {id} <<'EOF' ... EOF)");
     }
+    w.assert_writable(id)?;
     let mut page = match w.load_page(id) {
         Ok(p) => p,
         Err(_) => bail!("page '{id}' does not exist — create it with `wookie new {id}`"),
@@ -483,6 +500,7 @@ pub fn write(
 }
 
 pub fn rm(w: &Wiki, id: &str, json: bool) -> Result<String> {
+    w.assert_writable(id)?;
     let backlinks = w.backlinks(id);
     w.delete_page(id)?;
     w.commit(&format!("wookie: rm {id}"));
@@ -502,6 +520,8 @@ pub fn rm(w: &Wiki, id: &str, json: bool) -> Result<String> {
 
 pub fn mv(w: &Wiki, old: &str, new: &str, json: bool) -> Result<String> {
     wiki::validate_id(new)?;
+    w.assert_writable(old)?;
+    w.assert_writable(new)?;
     if w.exists(new) {
         bail!("page '{new}' already exists");
     }
@@ -554,7 +574,12 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
     }
 
     let mut created = vec![];
+    let mut skipped_locked = vec![];
     for (target, sources) in &missing {
+        if w.assert_writable(target).is_err() {
+            skipped_locked.push(target.clone());
+            continue;
+        }
         let mut stub = Page {
             id: target.clone(),
             fm: crate::page::Frontmatter {
@@ -587,10 +612,18 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
         .collect();
 
     if json {
-        return Ok(serde_json::json!({"created": created, "stubs": stubs}).to_string());
+        return Ok(serde_json::json!({"created": created, "stubs": stubs, "skipped_locked": skipped_locked}).to_string());
     }
 
     let mut out = String::new();
+    if !skipped_locked.is_empty() {
+        let _ = writeln!(
+            out,
+            "Skipped {} broken link(s) into locked sections: {} (ask the user before unlocking).",
+            skipped_locked.len(),
+            skipped_locked.join(", ")
+        );
+    }
     if created.is_empty() {
         let _ = writeln!(out, "No broken links found — nothing to stub.");
     } else {
@@ -1133,6 +1166,144 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
+pub fn unlock(w: &mut Wiki, section: &str, minutes: u64, json: bool) -> Result<String> {
+    let msg = w.unlock(section, minutes)?;
+    w.commit(&format!("wookie: unlock {section}"));
+    if json {
+        return Ok(serde_json::json!({"section": section, "minutes": minutes}).to_string());
+    }
+    Ok(msg)
+}
+
+pub fn lock(w: &mut Wiki, section: &str, json: bool) -> Result<String> {
+    let msg = w.relock(section)?;
+    w.commit(&format!("wookie: lock {section}"));
+    if json {
+        return Ok(serde_json::json!({"section": section, "locked": true}).to_string());
+    }
+    Ok(msg)
+}
+
+/// Assemble the critique briefing: target files + every rules section's
+/// checks page and rule pages + the output contract. The agent executes it;
+/// wookie only gathers.
+pub fn critique(
+    w: &Wiki,
+    cwd: &Path,
+    section: Option<&str>,
+    since: Option<&str>,
+    staged: bool,
+    paths: &[String],
+    json: bool,
+) -> Result<String> {
+    let root = ingest_root(w, cwd)?;
+
+    // Target: what is being critiqued, and how the agent views it.
+    let (target_desc, files, diff_cmd) = if !paths.is_empty() {
+        (
+            format!("{} explicitly given path(s)", paths.len()),
+            paths.to_vec(),
+            format!("read the files directly under {}", root.display()),
+        )
+    } else {
+        let (range, label) = match (since, staged) {
+            (Some(r), _) => (vec!["diff", "--name-only", r, "HEAD"], format!("changes since {r}")),
+            (None, true) => (vec!["diff", "--name-only", "--cached"], "staged changes".to_string()),
+            (None, false) => (vec!["diff", "--name-only", "HEAD"], "uncommitted changes".to_string()),
+        };
+        let out = std::process::Command::new("git").arg("-C").arg(&root).args(&range).output()?;
+        if !out.status.success() {
+            bail!(
+                "cannot compute target in {} — pass explicit paths: wookie critique --paths <files>",
+                root.display()
+            );
+        }
+        let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let view = range.join(" ").replace("--name-only ", "");
+        (label, files, format!("git -C {} {view}", root.display()))
+    };
+
+    // Rules sections, optionally narrowed to one.
+    let sections = w.sections();
+    let rules: Vec<(String, wiki::SectionConfig)> = sections
+        .into_iter()
+        .filter(|(name, cfg)| {
+            cfg.kind == wiki::SectionKind::Rules && section.map_or(true, |s| s == name)
+        })
+        .collect();
+    if rules.is_empty() {
+        bail!(
+            "no rules sections{} — mark one in wookie.toml with kind = \"rules\"",
+            section.map(|s| format!(" matching '{s}'")).unwrap_or_default()
+        );
+    }
+
+    if json {
+        return Ok(serde_json::json!({
+            "target": target_desc, "files": files, "diff_cmd": diff_cmd,
+            "sections": rules.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        })
+        .to_string());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Critique briefing — wiki '{}', target: {target_desc}", w.slug);
+    if files.is_empty() {
+        let _ = writeln!(out, "No target files — nothing to critique.");
+        return Ok(out.trim_end().to_string());
+    }
+    let _ = writeln!(out, "Files ({}):", files.len());
+    for f in files.iter().take(50) {
+        let _ = writeln!(out, "- {f}");
+    }
+    if files.len() > 50 {
+        let _ = writeln!(out, "  (+{} more)", files.len() - 50);
+    }
+    let _ = writeln!(out, "View the changes: {diff_cmd}");
+
+    for (name, cfg) in &rules {
+        let _ = writeln!(out, "\n== Rules: {name}/ — {} ==", cfg.description);
+        let checks_id = format!("{name}/checks");
+        match w.load_page(&checks_id) {
+            Ok(checks) => {
+                let _ = writeln!(out, "\n--- How to verify ({checks_id}) ---\n{}", checks.body.trim_end());
+            }
+            Err(_) => {
+                let _ = writeln!(
+                    out,
+                    "\n(no {checks_id} page — apply the rules below with judgment, and note that this section needs a checks page)"
+                );
+            }
+        }
+        let prefix = format!("{name}/");
+        let mut any = false;
+        for p in w.all_pages() {
+            if p.id.starts_with(&prefix) && p.id != checks_id {
+                any = true;
+                let _ = writeln!(out, "\n--- Rule ({}) ---\n{}", p.id, p.body.trim_end());
+            }
+        }
+        if !any {
+            let _ = writeln!(out, "\n(no rule pages in this section yet)");
+        }
+    }
+
+    let _ = write!(
+        out,
+        "\n== Output contract ==\n\
+         Now EXECUTE this critique against the target:\n\
+         1. Review the changes with the command above (and read files as needed).\n\
+         2. Check every rule. Report each violation as: severity (error|warn) | rule page id | file:line | what is wrong | suggested fix.\n\
+         3. End with a verdict per rules section: pass or fail.\n\
+         4. If a rule was unclear or seems outdated, say so — but do NOT edit rules sections; they are locked and changing them needs explicit user permission."
+    );
+    Ok(out.trim_end().to_string())
+}
+
 fn obsidian_app_config() -> PathBuf {
     let home = crate::config::user_home();
     #[cfg(target_os = "macos")]
@@ -1277,6 +1448,11 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
             if !ids.contains(&id) {
                 issues.push(format!("missing required page: '{id}'"));
             }
+        }
+        if cfg.kind == wiki::SectionKind::Rules && !ids.contains(&format!("{section}/checks")) {
+            issues.push(format!(
+                "rules section '{section}' has no checks page ('{section}/checks' tells critique how to verify its rules)"
+            ));
         }
     }
     if let (Some(last), Some(root)) = (&w.config.last_ingest_commit, w.config.project_roots.first()) {

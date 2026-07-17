@@ -26,46 +26,73 @@ pub struct WikiConfig {
     /// defaults apply (kept last: TOML wants tables after plain values).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub sections: std::collections::BTreeMap<String, SectionConfig>,
+    /// Active temporary unlocks: section -> RFC3339 expiry. Tool-owned.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub unlocks: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SectionKind {
+    /// Descriptive knowledge: architecture, code reference, decisions.
+    #[default]
+    Info,
+    /// Normative content: checkable via `wookie critique`, locked by default.
+    Rules,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SectionConfig {
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub kind: SectionKind,
+    /// Override the default lock (rules sections are locked unless told otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
     /// Page names (relative to the section) doctor insists on, e.g. "overview".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
 }
 
+impl SectionConfig {
+    pub fn is_locked(&self) -> bool {
+        self.locked.unwrap_or(self.kind == SectionKind::Rules)
+    }
+}
+
 pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
-    let s = |description: &str, required: &[&str]| SectionConfig {
+    let s = |description: &str, kind: SectionKind, required: &[&str]| SectionConfig {
         description: description.into(),
+        kind,
+        locked: None,
         required: required.iter().map(|r| r.to_string()).collect(),
     };
+    use SectionKind::{Info, Rules};
     std::collections::BTreeMap::from([
         (
             "architecture".to_string(),
-            s("System structure, boundaries, how subsystems interact", &["overview"]),
+            s("System structure, boundaries, how subsystems interact", Info, &["overview"]),
         ),
         (
             "code".to_string(),
-            s("Module-by-module reference (ingest seeds these)", &[]),
+            s("Module-by-module reference (ingest seeds these)", Info, &[]),
         ),
         (
             "decisions".to_string(),
-            s("Why things are the way they are, one page per decision", &[]),
+            s("Why things are the way they are, one page per decision", Info, &[]),
         ),
         (
             "guides".to_string(),
-            s("How to do common tasks: build, test, release, debug", &[]),
+            s("How to do common tasks: build, test, release, debug", Info, &[]),
         ),
         (
             "style".to_string(),
-            s("Code style, naming, idioms, review conventions", &[]),
+            s("Code style, naming, idioms, review conventions", Rules, &[]),
         ),
         (
             "workflow".to_string(),
-            s("How to commit, branch, PR, review and release; team process rules", &[]),
+            s("How to commit, branch, PR, review and release; team process rules", Rules, &[]),
         ),
     ])
 }
@@ -288,6 +315,68 @@ impl Wiki {
         let path = self.dir.join("wookie.toml");
         fs::write(&path, toml::to_string_pretty(&self.config)?)
             .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// A locked section is temporarily writable while an unlock is active.
+    pub fn is_unlocked(&self, section: &str) -> bool {
+        self.config
+            .unlocks
+            .get(section)
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|exp| chrono::Utc::now() < exp)
+            .unwrap_or(false)
+    }
+
+    /// Error unless the page's section is writable. The message doubles as
+    /// agent instructions: get user permission before unlocking.
+    pub fn assert_writable(&self, id: &str) -> Result<()> {
+        let Some((section, _)) = id.split_once('/') else {
+            return Ok(());
+        };
+        let sections = self.sections();
+        let Some(cfg) = sections.get(section) else {
+            return Ok(());
+        };
+        if cfg.is_locked() && !self.is_unlocked(section) {
+            bail!(
+                "section '{section}' is locked (it holds this project's rules). \
+                 Do NOT unlock it on your own: ask the user for explicit permission first, \
+                 then run `wookie unlock {section}` (auto-relocks in 15 min) and retry."
+            );
+        }
+        Ok(())
+    }
+
+    pub fn unlock(&mut self, section: &str, minutes: u64) -> Result<String> {
+        let sections = self.sections();
+        let Some(cfg) = sections.get(section) else {
+            bail!(
+                "unknown section '{section}'. Sections: {}",
+                sections.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        };
+        if !cfg.is_locked() {
+            return Ok(format!("Section '{section}' is not locked."));
+        }
+        let expiry = chrono::Utc::now() + chrono::Duration::minutes(minutes as i64);
+        self.config
+            .unlocks
+            .insert(section.to_string(), expiry.to_rfc3339());
+        // Prune expired entries while we are here.
+        let now = chrono::Utc::now();
+        self.config.unlocks.retain(|_, ts| {
+            chrono::DateTime::parse_from_rfc3339(ts).map(|e| now < e).unwrap_or(false)
+        });
+        self.save_config()?;
+        Ok(format!(
+            "Unlocked section '{section}' for {minutes} min (relock early with `wookie lock {section}`)."
+        ))
+    }
+
+    pub fn relock(&mut self, section: &str) -> Result<String> {
+        self.config.unlocks.remove(section);
+        self.save_config()?;
+        Ok(format!("Locked section '{section}'."))
     }
 
     fn git(&self, args: &[&str]) {

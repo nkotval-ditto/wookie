@@ -88,14 +88,22 @@ stays unpinned and is fetched on demand via read/search.
 
 ## Conventions (enforced by the tool; do not fight them)
 
-- Page ids are kebab-case paths: `scheduler`, `internals/retry-policy`.
+- Page ids are lowercase kebab-case paths: `scheduler`, `internals/retry-policy`.
 - Link pages with `[[page-id]]` or `[[page-id|display text]]`. Link liberally;
   a link to a page that doesn't exist yet is fine and becomes a stub via
   `wookie expand`.
 - The first paragraph of every page must be a standalone summary, readable
-  without the rest of the page (it is what `--expand` shows other readers).
+  without the rest of the page (it is what `--expand` and Obsidian hover
+  previews show). House style: **bold the key noun or claim** that opens it.
+- Pages about code include a `File:` line right after the summary paragraph,
+  e.g. ``File: `src/scheduler/retry.rs` `` — and set `--sources` to match.
+- Use Obsidian callouts for asides: `> [!note]` for gotchas and design
+  rationale, `> [!bug]` for known problems, `> [!tip]` for usage hints.
+- Structure longer pages with `## Role`, `## Key files`, `## Related` style
+  headings instead of one wall of text.
 - Never edit frontmatter timestamps or files under `~/.wookie` directly; go
-  through wookie commands so history and metadata stay correct.
+  through wookie commands so history and metadata stay correct (wikis render
+  as Obsidian vaults via `wookie obsidian`, so format discipline matters).
 
 ## Syncing with the codebase (the ingest workflow)
 

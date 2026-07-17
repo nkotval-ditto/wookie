@@ -24,10 +24,38 @@ pub struct Frontmatter {
     /// their full bodies. Reserve for rules every session must follow.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
+    /// Alternate names (usually the human title) so Obsidian hover,
+    /// search and [[Title]]-style links resolve.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// Frontmatter lines wookie doesn't own (e.g. Obsidian properties),
     /// preserved verbatim so human edits survive agent writes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra: Vec<String>,
+}
+
+/// Double-quote a YAML scalar. Descriptions routinely contain [[wikilinks]]
+/// and colons, which are invalid as bare YAML and break Obsidian Properties.
+fn yaml_quote(s: &str) -> String {
+    format!("\"{}\"", clean(s).replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn unquote(v: &str) -> String {
+    let v = v.trim();
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+        v[1..v.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
+    } else {
+        v.to_string()
+    }
+}
+
+fn parse_inline_list(value: &str) -> Vec<String> {
+    let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split(',')
+        .map(|t| unquote(t))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// Frontmatter values are single-line by format; strip anything that would
@@ -87,7 +115,32 @@ impl Page {
             if let Some(end) = rest.find("\n---") {
                 let block = &rest[..end];
                 let after = &rest[end + 4..];
+                // Which known list key a block-style `- item` line belongs to
+                // (Obsidian writes lists in block form).
+                #[derive(PartialEq)]
+                enum ListKey {
+                    Tags,
+                    Sources,
+                    Aliases,
+                }
+                let mut open_list: Option<ListKey> = None;
                 for line in block.lines() {
+                    if line.starts_with([' ', '\t']) {
+                        if let (Some(key), Some(item)) = (&open_list, line.trim().strip_prefix("- ")) {
+                            let item = unquote(item);
+                            match key {
+                                ListKey::Tags => fm.tags.push(item),
+                                ListKey::Sources => fm.sources.push(item),
+                                ListKey::Aliases => fm.aliases.push(item),
+                            }
+                            continue;
+                        }
+                        if !line.trim().is_empty() {
+                            fm.extra.push(line.to_string());
+                        }
+                        continue;
+                    }
+                    open_list = None;
                     let Some((key, value)) = line.split_once(':') else {
                         if !line.trim().is_empty() {
                             fm.extra.push(line.to_string());
@@ -96,27 +149,31 @@ impl Page {
                     };
                     let value = value.trim();
                     match key.trim() {
-                        "title" => fm.title = value.to_string(),
-                        "description" => fm.description = value.to_string(),
-                        "created" => fm.created = value.to_string(),
-                        "updated" => fm.updated = value.to_string(),
+                        "title" => fm.title = unquote(value),
+                        "description" => fm.description = unquote(value),
+                        "created" => fm.created = unquote(value),
+                        "updated" => fm.updated = unquote(value),
                         "status" => {
                             if !value.is_empty() {
-                                fm.status = Some(value.to_string());
+                                fm.status = Some(unquote(value));
                             }
                         }
                         "pin" => fm.pin = value == "true",
-                        "tags" | "sources" => {
-                            let inner = value.trim_start_matches('[').trim_end_matches(']');
-                            let items: Vec<String> = inner
-                                .split(',')
-                                .map(|t| t.trim().to_string())
-                                .filter(|t| !t.is_empty())
-                                .collect();
-                            if key.trim() == "tags" {
-                                fm.tags = items;
+                        "tags" | "sources" | "aliases" => {
+                            let list_key = match key.trim() {
+                                "tags" => ListKey::Tags,
+                                "sources" => ListKey::Sources,
+                                _ => ListKey::Aliases,
+                            };
+                            if value.is_empty() {
+                                open_list = Some(list_key);
                             } else {
-                                fm.sources = items;
+                                let items = parse_inline_list(value);
+                                match list_key {
+                                    ListKey::Tags => fm.tags = items,
+                                    ListKey::Sources => fm.sources = items,
+                                    ListKey::Aliases => fm.aliases = items,
+                                }
                             }
                         }
                         _ => fm.extra.push(line.to_string()),
@@ -133,25 +190,26 @@ impl Page {
         }
     }
 
-    /// Serialize back to the canonical on-disk format.
+    /// Serialize back to the canonical on-disk format: valid YAML, so
+    /// Obsidian renders the Properties panel instead of raw text.
     pub fn render(&self) -> String {
+        let quoted_list = |items: &[String]| {
+            items.iter().map(|t| yaml_quote(t)).collect::<Vec<_>>().join(", ")
+        };
         let mut s = String::from("---\n");
-        s.push_str(&format!("title: {}\n", clean(&self.fm.title)));
-        s.push_str(&format!("description: {}\n", clean(&self.fm.description)));
-        s.push_str(&format!(
-            "tags: [{}]\n",
-            self.fm.tags.iter().map(|t| clean(t)).collect::<Vec<_>>().join(", ")
-        ));
+        s.push_str(&format!("title: {}\n", yaml_quote(&self.fm.title)));
+        s.push_str(&format!("description: {}\n", yaml_quote(&self.fm.description)));
+        if !self.fm.aliases.is_empty() {
+            s.push_str(&format!("aliases: [{}]\n", quoted_list(&self.fm.aliases)));
+        }
+        s.push_str(&format!("tags: [{}]\n", quoted_list(&self.fm.tags)));
         s.push_str(&format!("created: {}\n", clean(&self.fm.created)));
         s.push_str(&format!("updated: {}\n", clean(&self.fm.updated)));
         if let Some(status) = &self.fm.status {
-            s.push_str(&format!("status: {}\n", clean(status)));
+            s.push_str(&format!("status: {}\n", yaml_quote(status)));
         }
         if !self.fm.sources.is_empty() {
-            s.push_str(&format!(
-                "sources: [{}]\n",
-                self.fm.sources.iter().map(|t| clean(t)).collect::<Vec<_>>().join(", ")
-            ));
+            s.push_str(&format!("sources: [{}]\n", quoted_list(&self.fm.sources)));
         }
         if self.fm.pin {
             s.push_str("pin: true\n");
@@ -223,6 +281,7 @@ mod tests {
                 status: Some("stub".into()),
                 sources: vec!["src/retry.rs".into(), "src/backoff/".into()],
                 pin: true,
+                aliases: vec!["Retry Policy".into()],
                 extra: vec![],
             },
             body: "Summary paragraph.\n\nMore detail with a [[scheduler]] link.".into(),
@@ -262,12 +321,39 @@ mod tests {
     }
 
     #[test]
-    fn unknown_frontmatter_lines_survive_roundtrip() {
-        let content = "---\ntitle: X\ndescription: d\naliases:\n  - other-name\ncssclasses: [wide]\n---\n\nBody.";
-        let p = Page::parse("x", content);
-        assert_eq!(p.fm.extra, vec!["aliases:", "  - other-name", "cssclasses: [wide]"]);
+    fn frontmatter_is_valid_yaml_with_links_and_colons() {
+        let p = Page {
+            id: "x".into(),
+            fm: Frontmatter {
+                title: "The \"Scheduler\"".into(),
+                description: "Keeps the [[hyperdrive]] running: fast".into(),
+                ..Default::default()
+            },
+            body: "Body.".into(),
+        };
         let rendered = p.render();
-        assert!(rendered.contains("aliases:\n  - other-name"), "got: {rendered}");
+        assert!(rendered.contains(r#"description: "Keeps the [[hyperdrive]] running: fast""#), "got: {rendered}");
+        let parsed = Page::parse("x", &rendered);
+        assert_eq!(parsed.fm.title, r#"The "Scheduler""#);
+        assert_eq!(parsed.fm.description, "Keeps the [[hyperdrive]] running: fast");
+    }
+
+    #[test]
+    fn block_style_lists_parse_into_known_fields() {
+        let content = "---\ntitle: X\naliases:\n  - Other Name\n  - X()\ntags:\n  - core\n---\n\nBody.";
+        let p = Page::parse("x", content);
+        assert_eq!(p.fm.aliases, vec!["Other Name", "X()"]);
+        assert_eq!(p.fm.tags, vec!["core"]);
+        assert!(p.fm.extra.is_empty(), "got extra: {:?}", p.fm.extra);
+    }
+
+    #[test]
+    fn unknown_frontmatter_lines_survive_roundtrip() {
+        let content = "---\ntitle: X\ndescription: d\ncustom-prop:\n  - other-name\ncssclasses: [wide]\n---\n\nBody.";
+        let p = Page::parse("x", content);
+        assert_eq!(p.fm.extra, vec!["custom-prop:", "  - other-name", "cssclasses: [wide]"]);
+        let rendered = p.render();
+        assert!(rendered.contains("custom-prop:\n  - other-name"), "got: {rendered}");
         assert!(rendered.contains("cssclasses: [wide]"), "got: {rendered}");
         let p2 = Page::parse("x", &rendered);
         assert_eq!(p2.fm.extra, p.fm.extra);

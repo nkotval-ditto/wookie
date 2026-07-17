@@ -104,12 +104,15 @@ pub fn init(
             status: None,
             sources: vec![],
             pin: false,
+            aliases: vec![humanize(&slug)],
             extra: vec![],
         },
         body: format!(
-            "Wiki for the project at {project_root}, managed by wookie.\n\n\
+            "**The front door of this wiki.** It maps the project at `{project_root}`; \
+             every page below is reachable by hovering or clicking a wikilink.\n\n\
              Add pages with `wookie new <id>` and connect them with wikilinks like `[[another-page]]`. \
-             Run `wookie context` for an overview and `wookie doctor` to check health."
+             Run `wookie context` for an overview and `wookie doctor` to check health.\n\n\
+             > [!tip] In Obsidian, hover any [[link]] to preview a page's summary paragraph."
         ),
     };
     w.save_page(&mut index, false)?;
@@ -392,10 +395,11 @@ pub fn new_page(
         bail!("page '{id}' already exists — use `wookie write {id}` to replace its body");
     }
     let has_body = body.as_deref().map(|b| !b.trim().is_empty()).unwrap_or(false);
+    let title_final = title.unwrap_or_else(|| humanize(id));
     let mut page = Page {
         id: id.to_string(),
         fm: crate::page::Frontmatter {
-            title: title.unwrap_or_else(|| humanize(id)),
+            title: title_final.clone(),
             description: if has_body { String::new() } else { format!("TODO: describe {id}") },
             tags,
             created: today(),
@@ -403,11 +407,15 @@ pub fn new_page(
             status: if has_body { None } else { Some("stub".into()) },
             sources,
             pin,
+            aliases: vec![title_final.clone()],
             extra: vec![],
         },
-        body: body
-            .filter(|b| !b.trim().is_empty())
-            .unwrap_or_else(|| "TODO: fill in this page.".to_string()),
+        body: body.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| {
+            format!(
+                "**TODO: define {title_final}.** Replace this with one bold-lead paragraph \
+                 that stands alone as the hover summary; link related pages with [[wikilinks]]."
+            )
+        }),
     };
     if has_body {
         page.fm.description = first_sentence(&page.summary());
@@ -601,11 +609,15 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
                 status: Some("stub".into()),
                 sources: vec![],
                 pin: false,
+                aliases: vec![humanize(target)],
                 extra: vec![],
             },
             body: format!(
-                "TODO: fill in this page. It is linked from: {}.",
-                sources.join(", ")
+                "**TODO: define {}.** Replace this with one bold-lead paragraph that \
+                 stands alone as the hover summary; link related pages with [[wikilinks]].\n\n\
+                 > [!note] Linked from: {}.",
+                humanize(target),
+                sources.iter().map(|s| format!("[[{s}]]")).collect::<Vec<_>>().join(", ")
             ),
         };
         w.save_page(&mut stub, false)?;
@@ -880,15 +892,22 @@ fn dir_stub_body(dir: &str, files: &[&String]) -> (String, String) {
 
     let description = format!("TODO: describe the {dir} module");
     let body = format!(
-        "TODO: document `{dir}` — its role in the project, main entry points, and how it connects to other modules.\n\n\
-         {} files{}. Start from: {}.",
+        "**TODO: what `{dir}` is and why it exists.** Replace this with one bold-lead \
+         paragraph that stands alone as the hover summary.\n\n\
+         File: `{dir}/`\n\n\
+         ## Role\n\n\
+         TODO: main entry points, and how this module connects to the rest of the system \
+         (link the other [[wikilinks|code pages]] it touches).\n\n\
+         ## Key files\n\n\
+         {}\n\n\
+         > [!note] {} files{}.",
+        notable.iter().map(|f| format!("- `{f}`")).collect::<Vec<_>>().join("\n"),
         files.len(),
         if main_exts.is_empty() {
             String::new()
         } else {
             format!(" (mostly {})", main_exts.join(", "))
         },
-        notable.join(", ")
     );
     (description, body)
 }
@@ -910,6 +929,7 @@ fn seed_code_stub(w: &Wiki, dir: &str, files: &[&String]) -> Result<Option<Strin
             status: Some("stub".into()),
             sources: vec![format!("{dir}/")],
             pin: false,
+            aliases: vec![humanize(&id)],
             extra: vec![],
         },
         body,
@@ -1568,6 +1588,13 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<(String, usize)> {
                 fixed.push(format!("normalized frontmatter of '{}'", p.id));
             } else {
                 issues.push(format!("missing/invalid frontmatter: '{}'", p.id));
+            }
+        } else if fix {
+            let on_disk = std::fs::read_to_string(w.page_path(&p.id)?).unwrap_or_default();
+            if on_disk != p.render() {
+                let mut p2 = p.clone();
+                w.save_page_raw(&mut p2, false)?;
+                fixed.push(format!("reserialized '{}' to canonical format", p.id));
             }
         }
         if p.fm.description.is_empty() || p.fm.description.starts_with("TODO") {

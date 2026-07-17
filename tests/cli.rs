@@ -68,7 +68,7 @@ fn init_list_and_cwd_resolution() {
 
     // Resolution from cwd, no --wiki flag: seeded index page is readable.
     let out = env.ok(&["read", "index"], None);
-    assert!(out.contains("managed by wookie"));
+    assert!(out.contains("front door of this wiki"));
 
     // Outside the project, resolution fails with a helpful error.
     let (success, _, stderr) = env.run_in(&std::env::temp_dir(), &["toc"], None);
@@ -222,7 +222,7 @@ fn ingest_fresh_then_update_lifecycle() {
 
     // The seeded stub carries sources pointing at its directory.
     let page = env.ok(&["read", "code/src/scheduler"], None);
-    assert!(page.contains("sources: [src/scheduler/]"), "stub sources missing: {page}");
+    assert!(page.contains("sources: [\"src/scheduler/\"]"), "stub sources missing: {page}");
 
     // Mark, then confirm a no-change update reports in-sync.
     env.ok(&["ingest", "--mark"], None);
@@ -255,11 +255,11 @@ fn write_sets_sources() {
     env.ok(&["init", "srcy"], None);
     env.ok(&["new", "concepts/auth", "--sources", "src/auth"], Some("Auth overview."));
     let page = env.ok(&["read", "concepts/auth"], None);
-    assert!(page.contains("sources: [src/auth]"), "got: {page}");
+    assert!(page.contains("sources: [\"src/auth\"]"), "got: {page}");
 
     env.ok(&["write", "concepts/auth", "--sources", "src/auth,src/session.rs"], Some("Updated overview."));
     let page = env.ok(&["read", "concepts/auth"], None);
-    assert!(page.contains("sources: [src/auth, src/session.rs]"), "got: {page}");
+    assert!(page.contains("sources: [\"src/auth\", \"src/session.rs\"]"), "got: {page}");
 }
 
 #[test]

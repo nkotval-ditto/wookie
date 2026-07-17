@@ -163,6 +163,14 @@ impl Wiki {
         let root = self.pages_dir();
         let mut ids: Vec<String> = walkdir::WalkDir::new(&root)
             .into_iter()
+            // Hidden dirs (e.g. pages/.obsidian) are never pages.
+            .filter_entry(|e| {
+                !e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with('.'))
+                    .unwrap_or(false)
+                    || e.depth() == 0
+            })
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter_map(|e| {

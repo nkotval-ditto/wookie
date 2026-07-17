@@ -51,6 +51,7 @@ wookie expand [<id>]           stub out broken links, print fill-in worklist
 wookie search <query> [--tag]  regex search over ids/titles/tags/bodies
 wookie links <id>              outlinks + backlinks
 wookie doctor [--fix]          health check
+wookie obsidian [--print]      open the wiki as an Obsidian vault
 wookie plugin install claude|codex
 wookie serve                   MCP server over stdio
 ```

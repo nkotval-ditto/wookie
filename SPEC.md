@@ -71,9 +71,10 @@ Body. Links: [[scheduler]] or [[internals/retry-policy|display text]].
 
 init, list, toc, context, read, new, write (stdin body, `--append`), rm, mv
 (rewrites inbound links), expand, search (case-insensitive regex, `--tag`),
-links (out + back), doctor (`--fix` repairs frontmatter), plugin install
-claude|codex, serve. Global flags: `--wiki`, `--json`. Errors always say what
-to run instead, because agents read errors.
+links (out + back), doctor (`--fix` repairs frontmatter), obsidian (open the
+wiki's `pages/` as an Obsidian vault via `obsidian://open`; `--print` emits
+the URI instead), plugin install claude|codex, serve. Global flags: `--wiki`,
+`--json`. Errors always say what to run instead, because agents read errors.
 
 ## MCP (`wookie serve`)
 

@@ -182,6 +182,18 @@ fn invalid_page_ids_rejected() {
 }
 
 #[test]
+fn obsidian_prepares_vault_and_prints_uri() {
+    let env = Env::new();
+    env.ok(&["init", "obsi"], None);
+    let out = env.ok(&["obsidian", "--print"], None);
+    assert!(out.starts_with("obsidian://open?path="), "got: {out}");
+    // Vault marker exists but never shows up as a page.
+    assert!(env.home.join("obsi/pages/.obsidian").is_dir());
+    let toc = env.ok(&["toc"], None);
+    assert!(!toc.contains(".obsidian"));
+}
+
+#[test]
 fn worktree_resolves_to_main_checkout_wiki() {
     let env = Env::new();
     let git = |args: &[&str], cwd: &Path| {

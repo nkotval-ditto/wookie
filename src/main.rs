@@ -88,6 +88,12 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
+    /// Open the wiki as an Obsidian vault
+    Obsidian {
+        /// Print the obsidian:// URI instead of launching Obsidian
+        #[arg(long)]
+        print: bool,
+    },
     /// Install agent integrations
     Plugin {
         #[command(subcommand)]
@@ -158,6 +164,7 @@ fn run() -> Result<()> {
         Cmd::Search { query, tag } => commands::search(&resolve()?, &query, tag.as_deref(), json)?,
         Cmd::Links { id } => commands::links(&resolve()?, &id, json)?,
         Cmd::Doctor { fix } => commands::doctor(&resolve()?, fix, json)?,
+        Cmd::Obsidian { print } => commands::obsidian(&resolve()?, print, json)?,
         Cmd::Plugin { cmd: PluginCmd::Install { target } } => plugins::install(target)?,
         Cmd::Serve => {
             mcp::serve()?;

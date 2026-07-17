@@ -605,6 +605,54 @@ pub fn links(w: &Wiki, id: &str, json: bool) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Open the wiki's pages/ folder as an Obsidian vault.
+pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
+    let vault = w.pages_dir();
+    // A .obsidian dir marks the folder as a vault so Obsidian opens it
+    // without an "open folder as vault" detour. Its contents stay out of
+    // wiki history via .gitignore.
+    std::fs::create_dir_all(vault.join(".obsidian"))?;
+    let gitignore = w.dir.join(".gitignore");
+    if !gitignore.exists() {
+        std::fs::write(&gitignore, "pages/.obsidian/\n")?;
+    }
+
+    let uri = format!(
+        "obsidian://open?path={}",
+        percent_encode(&vault.to_string_lossy())
+    );
+    if json {
+        return Ok(serde_json::json!({"vault": vault, "uri": uri, "opened": !print_only}).to_string());
+    }
+    if print_only {
+        return Ok(uri);
+    }
+
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let opener = "open";
+
+    let status = std::process::Command::new(opener).arg(&uri).status();
+    match status {
+        Ok(s) if s.success() => Ok(format!("Opened wiki '{}' in Obsidian: {}", w.slug, vault.display())),
+        _ => bail!("could not launch Obsidian — open this URI manually: {uri}"),
+    }
+}
+
 pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
     let mut issues: Vec<String> = vec![];
     let mut fixed: Vec<String> = vec![];

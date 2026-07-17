@@ -78,6 +78,29 @@ vault: registers it in Obsidian's own obsidian.json, then launches
 claude|codex, serve. Global flags: `--wiki`, `--json`. Errors always say what
 to run instead, because agents read errors.
 
+## Sections: where knowledge goes
+
+Sections are top-level namespaces declared per wiki in `wookie.toml`
+(`[sections.<name>]` with `description` and optional `required = ["page"]`).
+Built-in defaults (used verbatim by wikis with no `[sections]`): architecture
+(requires `overview`), code, decisions, guides, style, workflow. They are
+conventions with warnings, not walls:
+
+- `toc`/`context` group pages by section and print each description, so
+  priming teaches the wiki's shape; empty sections show as filing options
+- `new` notes when a page id is unfiled; doctor flags unfiled pages and
+  missing required pages; `index` is exempt
+- ingest worklists reference sections (missing required pages become step 2)
+
+## Pinned pages: always-on vs on-demand
+
+`pin: true` frontmatter (set via `--pin`/`--unpin` on new/write) marks a page
+as standing orders: `wookie context` inlines pinned bodies in full under
+"Pinned instructions", ahead of the section listing. Use for commit/PR rules,
+style laws, hard constraints. Everything unpinned is reference material
+fetched via read/search. Keep the pinned set small; it is paid on every
+session prime.
+
 ## Ingest: sync the wiki with the codebase
 
 wookie has no LLM inside, so ingest splits the work: wookie does the

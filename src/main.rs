@@ -62,6 +62,9 @@ enum Cmd {
         /// Comma-separated project paths this page documents (used by ingest)
         #[arg(long)]
         sources: Option<String>,
+        /// Pin: always-on instructions, inlined in full by `wookie context`
+        #[arg(long)]
+        pin: bool,
     },
     /// Replace a page's body from stdin (clears stub status)
     Write {
@@ -72,6 +75,12 @@ enum Cmd {
         /// Comma-separated project paths this page documents (used by ingest)
         #[arg(long)]
         sources: Option<String>,
+        /// Pin the page (always-on instructions, inlined by `wookie context`)
+        #[arg(long, conflicts_with = "unpin")]
+        pin: bool,
+        /// Remove the pin
+        #[arg(long)]
+        unpin: bool,
     },
     /// Delete a page
     Rm { id: String },
@@ -179,20 +188,22 @@ fn run() -> Result<()> {
         Cmd::Toc => commands::toc(&resolve()?, json)?,
         Cmd::Context => commands::context(&resolve()?, json)?,
         Cmd::Read { id, expand } => commands::read(&resolve()?, &id, expand.unwrap_or(0), json)?,
-        Cmd::New { id, title, tags, sources } => {
+        Cmd::New { id, title, tags, sources, pin } => {
             commands::new_page(
                 &resolve()?,
                 &id,
                 title,
                 split_csv(tags).unwrap_or_default(),
                 split_csv(sources).unwrap_or_default(),
+                pin,
                 stdin_body(),
                 json,
             )?
         }
-        Cmd::Write { id, append, sources } => {
+        Cmd::Write { id, append, sources, pin, unpin } => {
             let body = stdin_body().unwrap_or_default();
-            commands::write(&resolve()?, &id, &body, append, split_csv(sources), json)?
+            let pin = if pin { Some(true) } else if unpin { Some(false) } else { None };
+            commands::write(&resolve()?, &id, &body, append, split_csv(sources), pin, json)?
         }
         Cmd::Rm { id } => commands::rm(&resolve()?, &id, json)?,
         Cmd::Mv { old, new } => commands::mv(&resolve()?, &old, &new, json)?,

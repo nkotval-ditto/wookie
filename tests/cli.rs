@@ -263,6 +263,54 @@ fn write_sets_sources() {
 }
 
 #[test]
+fn sections_group_toc_and_flag_unfiled() {
+    let env = Env::new();
+    env.ok(&["init", "secty"], None);
+    env.ok(&["new", "architecture/overview"], Some("The big picture."));
+    let out = env.ok(&["new", "randopage"], Some("Floating knowledge."));
+    assert!(out.contains("unfiled"), "expected filing note: {out}");
+
+    let toc = env.ok(&["toc"], None);
+    assert!(toc.contains("architecture/ —"), "expected section header: {toc}");
+    assert!(toc.contains("workflow/ —"), "expected workflow section: {toc}");
+    assert!(toc.contains("unfiled"), "expected unfiled group: {toc}");
+
+    let out = env.ok(&["doctor"], None);
+    assert!(out.contains("unfiled page"), "doctor should flag unfiled: {out}");
+}
+
+#[test]
+fn doctor_requires_section_required_pages() {
+    let env = Env::new();
+    env.ok(&["init", "reqy"], None);
+    let out = env.ok(&["doctor"], None);
+    assert!(
+        out.contains("missing required page: 'architecture/overview'"),
+        "got: {out}"
+    );
+    env.ok(&["new", "architecture/overview"], Some("The big picture."));
+    let out = env.ok(&["doctor"], None);
+    assert!(!out.contains("missing required page"), "got: {out}");
+}
+
+#[test]
+fn pinned_pages_inline_in_context() {
+    let env = Env::new();
+    env.ok(&["init", "pinny"], None);
+    env.ok(
+        &["new", "workflow/commits", "--pin"],
+        Some("Always use conventional commits.\n\nScope tags come from the module name."),
+    );
+    let out = env.ok(&["context"], None);
+    assert!(out.contains("Pinned instructions"), "got: {out}");
+    assert!(out.contains("conventional commits"), "pinned body should be inlined: {out}");
+
+    env.ok(&["write", "workflow/commits", "--unpin"], Some("Always use conventional commits."));
+    let out = env.ok(&["context"], None);
+    assert!(!out.contains("Pinned instructions"), "unpin failed: {out}");
+}
+
+#[test]
 fn obsidian_prepares_vault_and_prints_uri() {
     let env = Env::new();
     env.ok(&["init", "obsi"], None);

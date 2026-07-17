@@ -20,6 +20,10 @@ pub struct Frontmatter {
     /// `wookie ingest` uses these to map code changes to stale pages.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    /// Pinned pages are always-on instructions: `wookie context` inlines
+    /// their full bodies. Reserve for rules every session must follow.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pin: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -88,6 +92,7 @@ impl Page {
                                 fm.status = Some(value.to_string());
                             }
                         }
+                        "pin" => fm.pin = value == "true",
                         "tags" | "sources" => {
                             let inner = value.trim_start_matches('[').trim_end_matches(']');
                             let items: Vec<String> = inner
@@ -128,6 +133,9 @@ impl Page {
         }
         if !self.fm.sources.is_empty() {
             s.push_str(&format!("sources: [{}]\n", self.fm.sources.join(", ")));
+        }
+        if self.fm.pin {
+            s.push_str("pin: true\n");
         }
         s.push_str("---\n\n");
         s.push_str(self.body.trim_end());
@@ -191,6 +199,7 @@ mod tests {
                 updated: "2026-07-17".into(),
                 status: Some("stub".into()),
                 sources: vec!["src/retry.rs".into(), "src/backoff/".into()],
+                pin: true,
             },
             body: "Summary paragraph.\n\nMore detail with a [[scheduler]] link.".into(),
         };
@@ -201,6 +210,7 @@ mod tests {
         assert_eq!(parsed.fm.tags, vec!["core", "scheduler"]);
         assert_eq!(parsed.fm.status.as_deref(), Some("stub"));
         assert_eq!(parsed.fm.sources, vec!["src/retry.rs", "src/backoff/"]);
+        assert!(parsed.fm.pin);
         assert_eq!(parsed.body.trim(), p.body.trim());
     }
 

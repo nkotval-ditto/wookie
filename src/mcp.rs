@@ -122,6 +122,7 @@ fn tool_defs() -> Vec<Value> {
                 "title": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
                 "sources": { "type": "array", "items": { "type": "string" }, "description": "Project-relative paths this page documents (used by ingest to detect staleness)." },
+                "pin": { "type": "boolean", "description": "Pin as always-on instructions: wiki_context inlines the full body. Reserve for rules every session must follow." },
                 "body": { "type": "string" },
             }))),
         }),
@@ -133,6 +134,7 @@ fn tool_defs() -> Vec<Value> {
                 "body": { "type": "string" },
                 "append": { "type": "boolean" },
                 "sources": { "type": "array", "items": { "type": "string" }, "description": "Replace the page's documented project paths." },
+                "pin": { "type": "boolean", "description": "Set or clear the page's pinned (always-on instructions) status." },
             }))),
         }),
         json!({
@@ -219,6 +221,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 str_arg("title"),
                 list_arg("tags"),
                 list_arg("sources"),
+                args.get("pin").and_then(Value::as_bool).unwrap_or(false),
                 str_arg("body"),
                 false,
             )
@@ -228,7 +231,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let sources = args.get("sources").and_then(Value::as_array).map(|a| {
                 a.iter().filter_map(Value::as_str).map(str::to_string).collect()
             });
-            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, false)
+            let pin = args.get("pin").and_then(Value::as_bool);
+            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, pin, false)
         }
         "ingest" => {
             let level = match str_arg("level").as_deref() {

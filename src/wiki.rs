@@ -22,6 +22,52 @@ pub struct WikiConfig {
     /// Project commit the wiki was last synced to (set by `wookie ingest --mark`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ingest_commit: Option<String>,
+    /// Top-level namespaces pages are filed under. Empty means the built-in
+    /// defaults apply (kept last: TOML wants tables after plain values).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sections: std::collections::BTreeMap<String, SectionConfig>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SectionConfig {
+    #[serde(default)]
+    pub description: String,
+    /// Page names (relative to the section) doctor insists on, e.g. "overview".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+}
+
+pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
+    let s = |description: &str, required: &[&str]| SectionConfig {
+        description: description.into(),
+        required: required.iter().map(|r| r.to_string()).collect(),
+    };
+    std::collections::BTreeMap::from([
+        (
+            "architecture".to_string(),
+            s("System structure, boundaries, how subsystems interact", &["overview"]),
+        ),
+        (
+            "code".to_string(),
+            s("Module-by-module reference (ingest seeds these)", &[]),
+        ),
+        (
+            "decisions".to_string(),
+            s("Why things are the way they are, one page per decision", &[]),
+        ),
+        (
+            "guides".to_string(),
+            s("How to do common tasks: build, test, release, debug", &[]),
+        ),
+        (
+            "style".to_string(),
+            s("Code style, naming, idioms, review conventions", &[]),
+        ),
+        (
+            "workflow".to_string(),
+            s("How to commit, branch, PR, review and release; team process rules", &[]),
+        ),
+    ])
 }
 
 pub struct Wiki {
@@ -226,6 +272,16 @@ impl Wiki {
             .filter(|p| p.id != id && p.links().iter().any(|l| l == id))
             .map(|p| p.id.clone())
             .collect()
+    }
+
+    /// Effective sections: the wiki's own, or the built-in defaults so
+    /// pre-sections wikis get the feature without migration.
+    pub fn sections(&self) -> std::collections::BTreeMap<String, SectionConfig> {
+        if self.config.sections.is_empty() {
+            default_sections()
+        } else {
+            self.config.sections.clone()
+        }
     }
 
     pub fn save_config(&self) -> Result<()> {

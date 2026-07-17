@@ -37,6 +37,30 @@ wookie list / wookie init      # all wikis / register a new one for this project
 Add `--wiki <slug>` if you are outside the project directory, and `--json` for
 machine-readable output.
 
+## Where knowledge goes (sections)
+
+File every page under the best-fitting section (defaults below; `wookie
+context` shows the wiki's actual set, configurable in its wookie.toml):
+
+- `architecture/` — system structure, boundaries, subsystem interactions
+  (`architecture/overview` is required)
+- `code/` — module-by-module reference; ingest seeds these
+- `decisions/` — why things are the way they are, one page per decision
+- `guides/` — how to do common tasks: build, test, release, debug
+- `style/` — code style, naming, idioms, review conventions
+- `workflow/` — how to commit, branch, PR, review, release; process rules
+
+Unfiled pages are allowed but flagged by doctor.
+
+## Pinned pages (always-on instructions)
+
+Pages with `pin: true` are inlined in full by `wookie context`: they are the
+wiki's standing orders (commit format, PR rules, hard constraints), not
+reference material. Follow them for the whole session. Pin with
+`wookie new/write <id> --pin`, unpin with `--unpin`. Keep the pinned set
+small — a handful of short pages — or priming drowns in it. Everything else
+stays unpinned and is fetched on demand via read/search.
+
 ## Conventions (enforced by the tool; do not fight them)
 
 - Page ids are kebab-case paths: `scheduler`, `internals/retry-policy`.

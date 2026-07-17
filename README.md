@@ -36,6 +36,15 @@ summary, and `[[wikilinks]]` between pages. Links inside code spans are
 ignored. Broken links are not errors: `wookie expand` turns them into stub
 pages, which is how the wiki grows.
 
+Pages are filed under sections: top-level namespaces declared in each
+`wookie.toml` (defaults: `architecture/`, `code/`, `decisions/`, `guides/`,
+`style/`, `workflow/`). `toc` and `context` group by section, unfiled pages
+are doctor findings, and sections can require pages (`architecture/overview`
+by default). Pages carrying `pin: true` (via `--pin`) are always-on
+instructions: `context` inlines their full bodies, so commit/PR rules and
+hard constraints reach the agent every session while reference pages stay
+on-demand.
+
 `wookie ingest` keeps the wiki synced with the code. The first run inventories
 the project, seeds `code/<module>` stubs and prints a documentation worklist
 at the chosen intensity (`quick`: index + module overviews; `standard`: +

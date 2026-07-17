@@ -80,6 +80,7 @@ pub fn init(
         project_roots: vec![project_root.clone()],
         auto_commit: None,
         last_ingest_commit: None,
+        sections: wiki::default_sections(),
     };
     std::fs::write(dir.join("wookie.toml"), toml::to_string_pretty(&wiki_config)?)?;
 
@@ -104,6 +105,7 @@ pub fn init(
             updated: today(),
             status: None,
             sources: vec![],
+            pin: false,
         },
         body: format!(
             "Wiki for the project at {project_root}, managed by wookie.\n\n\
@@ -178,51 +180,117 @@ fn toc_rows(w: &Wiki) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-pub fn toc(w: &Wiki, json: bool) -> Result<String> {
+fn section_of(id: &str) -> Option<&str> {
+    id.split_once('/').map(|(s, _)| s)
+}
+
+/// Pages grouped into (index row, section rows in section order, unfiled rows).
+/// `index` is the wiki's front door and leads the listing.
+type Row = (String, String, bool);
+type Rows = Vec<Row>;
+fn grouped_rows(w: &Wiki) -> (Option<Row>, Vec<(String, wiki::SectionConfig, Rows)>, Rows) {
+    let sections = w.sections();
     let rows = toc_rows(w);
-    if json {
-        let items: Vec<_> = rows
-            .iter()
-            .map(|(id, d, stub)| serde_json::json!({"id": id, "description": d, "stub": stub}))
-            .collect();
-        return Ok(serde_json::json!({"wiki": w.slug, "pages": items}).to_string());
+    let mut by_section: BTreeMap<String, Rows> = BTreeMap::new();
+    let mut unfiled: Rows = vec![];
+    let mut index: Option<Row> = None;
+    for row in rows {
+        let sec = section_of(&row.0).map(str::to_string);
+        match sec {
+            Some(s) if sections.contains_key(&s) => by_section.entry(s).or_default().push(row),
+            _ if row.0 == "index" => index = Some(row),
+            _ => unfiled.push(row),
+        }
     }
-    if rows.is_empty() {
+    let grouped = sections
+        .into_iter()
+        .map(|(name, cfg)| {
+            let pages = by_section.remove(&name).unwrap_or_default();
+            (name, cfg, pages)
+        })
+        .collect();
+    (index, grouped, unfiled)
+}
+
+fn render_grouped(w: &Wiki, out: &mut String) {
+    let (index, grouped, unfiled) = grouped_rows(w);
+    if let Some((id, desc, _)) = &index {
+        let _ = writeln!(out, "\n- {id} — {desc}");
+    }
+    for (name, cfg, pages) in &grouped {
+        let _ = writeln!(out, "\n{name}/ — {}", cfg.description);
+        if pages.is_empty() {
+            let _ = writeln!(out, "  (no pages yet)");
+        }
+        for (id, desc, stub) in pages {
+            let marker = if *stub { "  [stub]" } else { "" };
+            let _ = writeln!(out, "- {id} — {desc}{marker}");
+        }
+    }
+    if !unfiled.is_empty() {
+        let _ = writeln!(out, "\nunfiled (consider moving under a section):");
+        for (id, desc, stub) in &unfiled {
+            let marker = if *stub { "  [stub]" } else { "" };
+            let _ = writeln!(out, "- {id} — {desc}{marker}");
+        }
+    }
+}
+
+fn grouped_json(w: &Wiki) -> serde_json::Value {
+    let (index, grouped, unfiled) = grouped_rows(w);
+    serde_json::json!({
+        "index": index.map(|(id, d, _)| serde_json::json!({"id": id, "description": d})),
+        "sections": grouped.iter().map(|(name, cfg, pages)| serde_json::json!({
+            "name": name,
+            "description": cfg.description,
+            "required": cfg.required,
+            "pages": pages.iter().map(|(id, d, stub)| serde_json::json!({"id": id, "description": d, "stub": stub})).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "unfiled": unfiled.iter().map(|(id, d, stub)| serde_json::json!({"id": id, "description": d, "stub": stub})).collect::<Vec<_>>(),
+    })
+}
+
+pub fn toc(w: &Wiki, json: bool) -> Result<String> {
+    if json {
+        let mut v = grouped_json(w);
+        v["wiki"] = serde_json::json!(w.slug);
+        return Ok(v.to_string());
+    }
+    if toc_rows(w).is_empty() {
         return Ok(format!("Wiki '{}' has no pages yet.", w.slug));
     }
     let mut out = String::new();
-    for (id, desc, stub) in rows {
-        let marker = if stub { "  [stub]" } else { "" };
-        let _ = writeln!(out, "- {id} — {desc}{marker}");
-    }
-    Ok(out.trim_end().to_string())
+    render_grouped(w, &mut out);
+    Ok(out.trim().to_string())
 }
 
 pub fn context(w: &Wiki, json: bool) -> Result<String> {
-    let rows = toc_rows(w);
-    let stubs = rows.iter().filter(|(_, _, s)| *s).count();
+    let pages = w.all_pages();
+    let stubs = pages.iter().filter(|p| p.is_stub()).count();
+    let pinned: Vec<&Page> = pages.iter().filter(|p| p.fm.pin).collect();
     if json {
-        let items: Vec<_> = rows
+        let mut v = grouped_json(w);
+        v["wiki"] = serde_json::json!(w.slug);
+        v["description"] = serde_json::json!(w.config.description);
+        v["project_roots"] = serde_json::json!(w.config.project_roots);
+        v["pinned"] = pinned
             .iter()
-            .map(|(id, d, stub)| serde_json::json!({"id": id, "description": d, "stub": stub}))
+            .map(|p| serde_json::json!({"id": p.id, "body": p.body}))
             .collect();
-        return Ok(serde_json::json!({
-            "wiki": w.slug,
-            "description": w.config.description,
-            "project_roots": w.config.project_roots,
-            "pages": items,
-        })
-        .to_string());
+        return Ok(v.to_string());
     }
     let mut out = String::new();
     let _ = writeln!(out, "Wiki: {} — {}", w.slug, w.config.description);
     let _ = writeln!(out, "Project roots: {}", w.config.project_roots.join(", "));
-    let _ = writeln!(out, "{} pages, {} stubs needing content", rows.len(), stubs);
-    let _ = writeln!(out, "\nPages:");
-    for (id, desc, stub) in &rows {
-        let marker = if *stub { "  [stub]" } else { "" };
-        let _ = writeln!(out, "- {id} — {desc}{marker}");
+    let _ = writeln!(out, "{} pages, {} stubs needing content", pages.len(), stubs);
+    if !pinned.is_empty() {
+        let _ = writeln!(out, "\n== Pinned instructions (always follow these) ==");
+        for p in &pinned {
+            let _ = writeln!(out, "\n### {} ({})\n{}", p.fm.title, p.id, p.body.trim_end());
+        }
+        let _ = writeln!(out, "\n== Reference pages (read on demand) ==");
     }
+    render_grouped(w, &mut out);
     let _ = writeln!(
         out,
         "\nRead a page with linked context: wookie read <id> --expand\nSearch: wookie search <query> | Grow: wookie expand"
@@ -300,6 +368,7 @@ pub fn new_page(
     title: Option<String>,
     tags: Vec<String>,
     sources: Vec<String>,
+    pin: bool,
     body: Option<String>,
     json: bool,
 ) -> Result<String> {
@@ -318,6 +387,7 @@ pub fn new_page(
             updated: today(),
             status: if has_body { None } else { Some("stub".into()) },
             sources,
+            pin,
         },
         body: body
             .filter(|b| !b.trim().is_empty())
@@ -329,15 +399,23 @@ pub fn new_page(
     w.save_page(&mut page, false)?;
     w.commit(&format!("wookie: new {id}"));
 
+    let filing_note = match section_of(id) {
+        Some(s) if w.sections().contains_key(s) => String::new(),
+        _ if id == "index" => String::new(),
+        _ => format!(
+            "\nNote: '{id}' is unfiled. Known sections: {}. Consider `wookie mv` into one.",
+            w.sections().keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+    };
     if json {
-        return Ok(serde_json::json!({"id": id, "stub": page.is_stub()}).to_string());
+        return Ok(serde_json::json!({"id": id, "stub": page.is_stub(), "unfiled": !filing_note.is_empty()}).to_string());
     }
     if page.is_stub() {
         Ok(format!(
-            "Created stub '{id}'. Fill it by piping a body: wookie write {id} <<'EOF' ... EOF"
+            "Created stub '{id}'. Fill it by piping a body: wookie write {id} <<'EOF' ... EOF{filing_note}"
         ))
     } else {
-        Ok(format!("Created page '{id}'."))
+        Ok(format!("Created page '{id}'.{filing_note}"))
     }
 }
 
@@ -355,6 +433,7 @@ pub fn write(
     body: &str,
     append: bool,
     sources: Option<Vec<String>>,
+    pin: Option<bool>,
     json: bool,
 ) -> Result<String> {
     if body.trim().is_empty() {
@@ -374,6 +453,9 @@ pub fn write(
     page.fm.status = None;
     if let Some(sources) = sources {
         page.fm.sources = sources;
+    }
+    if let Some(pin) = pin {
+        page.fm.pin = pin;
     }
     if page.fm.description.is_empty() || page.fm.description.starts_with("TODO") {
         page.fm.description = first_sentence(&page.summary());
@@ -483,6 +565,7 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
                 updated: today(),
                 status: Some("stub".into()),
                 sources: vec![],
+                pin: false,
             },
             body: format!(
                 "TODO: fill in this page. It is linked from: {}.",
@@ -782,6 +865,7 @@ fn seed_code_stub(w: &Wiki, dir: &str, files: &[&String]) -> Result<Option<Strin
             updated: today(),
             status: Some("stub".into()),
             sources: vec![format!("{dir}/")],
+            pin: false,
         },
         body,
     };
@@ -897,13 +981,24 @@ fn ingest_fresh(w: &Wiki, root: &Path, level: IngestLevel, json: bool) -> Result
         "1. Read the entry points: {}.",
         if entries.is_empty() { "(none found — skim the file tree)".into() } else { entries.join(", ") }
     );
+    let missing_required: Vec<String> = w
+        .sections()
+        .iter()
+        .flat_map(|(s, cfg)| cfg.required.iter().map(move |r| format!("{s}/{r}")))
+        .filter(|id| !w.exists(id))
+        .collect();
     let _ = writeln!(
         out,
-        "2. Write 'index': what the project is and how it is laid out. Link every code/* page."
+        "2. Write 'index' (what the project is, how it is laid out, link every code/* page){}.",
+        if missing_required.is_empty() {
+            String::new()
+        } else {
+            format!(" and the required pages: {}", missing_required.join(", "))
+        }
     );
     let _ = writeln!(
         out,
-        "3. Fill each seeded stub: read the module's key files, then pipe a body with `wookie write <id>`."
+        "3. Fill each seeded stub: read the module's key files, then pipe a body with `wookie write <id>`. File flow/concept pages under the sections shown by `wookie context` (workflow/ for commit+PR rules, style/ for conventions)."
     );
     match level {
         IngestLevel::Quick => {}
@@ -1169,6 +1264,19 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
         }
         if p.id != "index" && !linked.contains(&p.id) {
             issues.push(format!("orphan (no page links to it): '{}'", p.id));
+        }
+        match section_of(&p.id) {
+            Some(s) if w.sections().contains_key(s) => {}
+            _ if p.id == "index" => {}
+            _ => issues.push(format!("unfiled page (not under any section): '{}'", p.id)),
+        }
+    }
+    for (section, cfg) in w.sections() {
+        for required in &cfg.required {
+            let id = format!("{section}/{required}");
+            if !ids.contains(&id) {
+                issues.push(format!("missing required page: '{id}'"));
+            }
         }
     }
     if let (Some(last), Some(root)) = (&w.config.last_ingest_commit, w.config.project_roots.first()) {

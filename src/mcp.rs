@@ -1,0 +1,220 @@
+//! MCP server over stdio (newline-delimited JSON-RPC 2.0). A thin mirror of
+//! the CLI: every tool resolves a wiki the same way the CLI does, then calls
+//! into `commands`. Hand-rolled on purpose — the protocol surface we need is
+//! four methods, not worth an async runtime.
+
+use crate::{commands, config, wiki};
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+
+pub fn serve() -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = msg.get("id").cloned();
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = msg.get("params").cloned().unwrap_or(json!({}));
+
+        let response = match method {
+            "initialize" => {
+                let pv = params
+                    .get("protocolVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("2025-06-18");
+                Some(json!({
+                    "protocolVersion": pv,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "wookie", "version": env!("CARGO_PKG_VERSION") },
+                }))
+            }
+            "ping" => Some(json!({})),
+            "tools/list" => Some(json!({ "tools": tool_defs() })),
+            "tools/call" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                let result = call_tool(name, &args);
+                Some(match result {
+                    Ok(text) => json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "isError": false,
+                    }),
+                    Err(e) => json!({
+                        "content": [{ "type": "text", "text": format!("Error: {e:#}") }],
+                        "isError": true,
+                    }),
+                })
+            }
+            _ => None,
+        };
+
+        // Notifications (no id) never get a response.
+        let Some(id) = id else { continue };
+        let payload = match response {
+            Some(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            None => json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32601, "message": format!("method not found: {method}") },
+            }),
+        };
+        writeln!(stdout, "{payload}")?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+fn schema(required: &[&str], props: Value) -> Value {
+    json!({ "type": "object", "properties": props, "required": required })
+}
+
+fn wiki_props(mut extra: Value) -> Value {
+    let base = json!({
+        "wiki": { "type": "string", "description": "Wiki slug. Omit to resolve from cwd." },
+        "cwd": { "type": "string", "description": "Directory used to resolve which wiki applies. Defaults to the server's cwd." },
+    });
+    if let (Some(b), Some(e)) = (base.as_object(), extra.as_object_mut()) {
+        for (k, v) in b {
+            e.entry(k.clone()).or_insert(v.clone());
+        }
+    }
+    extra
+}
+
+fn tool_defs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "wiki_list",
+            "description": "List all wookie wikis with page counts and project roots.",
+            "inputSchema": schema(&[], json!({})),
+        }),
+        json!({
+            "name": "wiki_context",
+            "description": "Compact digest of a wiki: description, page list with one-line summaries, stub count. Call this first when starting work on a project.",
+            "inputSchema": schema(&[], wiki_props(json!({}))),
+        }),
+        json!({
+            "name": "wiki_toc",
+            "description": "Table of contents: every page id with its one-line description.",
+            "inputSchema": schema(&[], wiki_props(json!({}))),
+        }),
+        json!({
+            "name": "page_read",
+            "description": "Read a wiki page. Set expand=1 (or deeper) to inline the summary of every [[wikilinked]] page.",
+            "inputSchema": schema(&["id"], wiki_props(json!({
+                "id": { "type": "string", "description": "Page id, e.g. 'scheduler' or 'internals/retry-policy'." },
+                "expand": { "type": "integer", "description": "Depth of linked context to inline (default 0)." },
+            }))),
+        }),
+        json!({
+            "name": "page_new",
+            "description": "Create a wiki page. Body markdown may contain [[wikilinks]]; the first paragraph must be a standalone summary. Without a body this creates a stub.",
+            "inputSchema": schema(&["id"], wiki_props(json!({
+                "id": { "type": "string" },
+                "title": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "body": { "type": "string" },
+            }))),
+        }),
+        json!({
+            "name": "page_write",
+            "description": "Replace (or append to) a page's body. Clears stub status. First paragraph must be a standalone summary.",
+            "inputSchema": schema(&["id", "body"], wiki_props(json!({
+                "id": { "type": "string" },
+                "body": { "type": "string" },
+                "append": { "type": "boolean" },
+            }))),
+        }),
+        json!({
+            "name": "page_move",
+            "description": "Rename/move a page and rewrite all inbound [[wikilinks]].",
+            "inputSchema": schema(&["from", "to"], wiki_props(json!({
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+            }))),
+        }),
+        json!({
+            "name": "page_remove",
+            "description": "Delete a page. Reports any pages left with dangling links.",
+            "inputSchema": schema(&["id"], wiki_props(json!({ "id": { "type": "string" } }))),
+        }),
+        json!({
+            "name": "wiki_expand",
+            "description": "Grow the wiki: create stub pages for every broken [[wikilink]] (on one page, or wiki-wide) and return the worklist of stubs to fill.",
+            "inputSchema": schema(&[], wiki_props(json!({
+                "id": { "type": "string", "description": "Limit to one page's broken links. Omit for wiki-wide." },
+            }))),
+        }),
+        json!({
+            "name": "search",
+            "description": "Search page ids, titles, tags and bodies (case-insensitive regex).",
+            "inputSchema": schema(&["query"], wiki_props(json!({
+                "query": { "type": "string" },
+                "tag": { "type": "string", "description": "Only pages with this tag." },
+            }))),
+        }),
+        json!({
+            "name": "links",
+            "description": "Outlinks and backlinks of a page.",
+            "inputSchema": schema(&["id"], wiki_props(json!({ "id": { "type": "string" } }))),
+        }),
+        json!({
+            "name": "doctor",
+            "description": "Wiki health check: broken links, orphans, stubs, missing summaries. fix=true repairs frontmatter mechanically.",
+            "inputSchema": schema(&[], wiki_props(json!({ "fix": { "type": "boolean" } }))),
+        }),
+    ]
+}
+
+fn call_tool(name: &str, args: &Value) -> Result<String> {
+    let home = config::wookie_home();
+    let str_arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    let cwd = str_arg("cwd")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let wiki_flag = str_arg("wiki");
+    let resolve = || wiki::resolve(&home, wiki_flag.as_deref(), &cwd);
+    let require = |k: &str| {
+        str_arg(k).ok_or_else(|| anyhow!("missing required argument '{k}'"))
+    };
+
+    match name {
+        "wiki_list" => commands::list(&home, false),
+        "wiki_context" => commands::context(&resolve()?, false),
+        "wiki_toc" => commands::toc(&resolve()?, false),
+        "page_read" => {
+            let expand = args.get("expand").and_then(Value::as_u64).unwrap_or(0) as usize;
+            commands::read(&resolve()?, &require("id")?, expand, false)
+        }
+        "page_new" => {
+            let tags = args
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            commands::new_page(&resolve()?, &require("id")?, str_arg("title"), tags, str_arg("body"), false)
+        }
+        "page_write" => {
+            let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
+            commands::write(&resolve()?, &require("id")?, &require("body")?, append, false)
+        }
+        "page_move" => commands::mv(&resolve()?, &require("from")?, &require("to")?, false),
+        "page_remove" => commands::rm(&resolve()?, &require("id")?, false),
+        "wiki_expand" => commands::expand(&resolve()?, str_arg("id").as_deref(), false),
+        "search" => commands::search(&resolve()?, &require("query")?, str_arg("tag").as_deref(), false),
+        "links" => commands::links(&resolve()?, &require("id")?, false),
+        "doctor" => {
+            let fix = args.get("fix").and_then(Value::as_bool).unwrap_or(false);
+            commands::doctor(&resolve()?, fix, false)
+        }
+        _ => Err(anyhow!("unknown tool: {name}")),
+    }
+}

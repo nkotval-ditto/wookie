@@ -1,0 +1,172 @@
+mod commands;
+mod config;
+mod mcp;
+mod page;
+mod plugins;
+mod wiki;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "wookie", version, about = "LLM-first wiki manager")]
+struct Cli {
+    /// Wiki slug to operate on (default: resolved from the current directory)
+    #[arg(long, global = true)]
+    wiki: Option<String>,
+
+    /// Emit machine-readable JSON
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Create a wiki for a project and register it
+    Init {
+        /// Wiki slug (default: derived from the project directory name)
+        slug: Option<String>,
+        /// Project root to register (default: this git repo's main worktree, else cwd)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// One-line wiki description
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List all wikis
+    List,
+    /// Table of contents: every page with its description
+    Toc,
+    /// Compact digest of the wiki for priming an agent
+    Context,
+    /// Print a page; --expand inlines summaries of linked pages
+    Read {
+        id: String,
+        /// Inline linked-page summaries to this depth (default 1 when flag given)
+        #[arg(long, num_args = 0..=1, default_missing_value = "1", value_name = "DEPTH")]
+        expand: Option<usize>,
+    },
+    /// Create a page (body from stdin if piped; otherwise a stub)
+    New {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
+    /// Replace a page's body from stdin (clears stub status)
+    Write {
+        id: String,
+        /// Append to the body instead of replacing it
+        #[arg(long)]
+        append: bool,
+    },
+    /// Delete a page
+    Rm { id: String },
+    /// Rename/move a page, rewriting all inbound wikilinks
+    Mv { old: String, new: String },
+    /// Create stubs for broken [[wikilinks]] and print the fill-in worklist
+    Expand { id: Option<String> },
+    /// Search ids, titles, tags and bodies (case-insensitive regex)
+    Search {
+        query: String,
+        /// Only pages carrying this tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Outlinks and backlinks of a page
+    Links { id: String },
+    /// Health check: broken links, orphans, stubs, missing summaries
+    Doctor {
+        /// Mechanically repair frontmatter issues
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Install agent integrations
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    /// Run the MCP server over stdio
+    Serve,
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// Install the integration for an agent (claude or codex)
+    Install {
+        #[arg(value_enum)]
+        target: plugins::Target,
+    },
+}
+
+fn stdin_body() -> Option<String> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    stdin.lock().read_to_string(&mut buf).ok()?;
+    if buf.trim().is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let home = config::wookie_home();
+    let cwd = std::env::current_dir()?;
+    let json = cli.json;
+    let resolve = || wiki::resolve(&home, cli.wiki.as_deref(), &cwd);
+
+    let out = match cli.cmd {
+        Cmd::Init { slug, project, description } => {
+            commands::init(&home, &cwd, slug, project, description, json)?
+        }
+        Cmd::List => commands::list(&home, json)?,
+        Cmd::Toc => commands::toc(&resolve()?, json)?,
+        Cmd::Context => commands::context(&resolve()?, json)?,
+        Cmd::Read { id, expand } => commands::read(&resolve()?, &id, expand.unwrap_or(0), json)?,
+        Cmd::New { id, title, tags } => {
+            let tags = tags
+                .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+            commands::new_page(&resolve()?, &id, title, tags, stdin_body(), json)?
+        }
+        Cmd::Write { id, append } => {
+            let body = stdin_body().unwrap_or_default();
+            commands::write(&resolve()?, &id, &body, append, json)?
+        }
+        Cmd::Rm { id } => commands::rm(&resolve()?, &id, json)?,
+        Cmd::Mv { old, new } => commands::mv(&resolve()?, &old, &new, json)?,
+        Cmd::Expand { id } => commands::expand(&resolve()?, id.as_deref(), json)?,
+        Cmd::Search { query, tag } => commands::search(&resolve()?, &query, tag.as_deref(), json)?,
+        Cmd::Links { id } => commands::links(&resolve()?, &id, json)?,
+        Cmd::Doctor { fix } => commands::doctor(&resolve()?, fix, json)?,
+        Cmd::Plugin { cmd: PluginCmd::Install { target } } => plugins::install(target)?,
+        Cmd::Serve => {
+            mcp::serve()?;
+            String::new()
+        }
+    };
+
+    if !out.is_empty() {
+        println!("{out}");
+    }
+    Ok(())
+}

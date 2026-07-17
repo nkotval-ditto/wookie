@@ -123,6 +123,7 @@ fn tool_defs() -> Vec<Value> {
                 "tags": { "type": "array", "items": { "type": "string" } },
                 "sources": { "type": "array", "items": { "type": "string" }, "description": "Project-relative paths this page documents (used by ingest to detect staleness)." },
                 "pin": { "type": "boolean", "description": "Pin as always-on instructions: wiki_context inlines the full body. Reserve for rules every session must follow." },
+                "description": { "type": "string", "description": "One-line description shown in tocs (default: derived from the body)." },
                 "body": { "type": "string" },
             }))),
         }),
@@ -135,6 +136,7 @@ fn tool_defs() -> Vec<Value> {
                 "append": { "type": "boolean" },
                 "sources": { "type": "array", "items": { "type": "string" }, "description": "Replace the page's documented project paths." },
                 "pin": { "type": "boolean", "description": "Set or clear the page's pinned (always-on instructions) status." },
+                "description": { "type": "string", "description": "Replace the one-line description." },
             }))),
         }),
         json!({
@@ -193,9 +195,10 @@ fn tool_defs() -> Vec<Value> {
         json!({
             "name": "unlock_section",
             "description": "Temporarily unlock a locked (rules) section so its pages can be edited. NEVER call this without the user's explicit permission in the current conversation. Relocks automatically.",
-            "inputSchema": schema(&["section"], wiki_props(json!({
+            "inputSchema": schema(&["section", "user_approved"], wiki_props(json!({
                 "section": { "type": "string" },
                 "minutes": { "type": "integer", "description": "Minutes until auto-relock (default 15)." },
+                "user_approved": { "type": "boolean", "description": "Set true ONLY if the user explicitly approved editing this section in the current conversation. Anything else is a violation." },
             }))),
         }),
         json!({
@@ -242,6 +245,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 &resolve()?,
                 &require("id")?,
                 str_arg("title"),
+                str_arg("description"),
                 list_arg("tags"),
                 list_arg("sources"),
                 args.get("pin").and_then(Value::as_bool).unwrap_or(false),
@@ -255,7 +259,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 a.iter().filter_map(Value::as_str).map(str::to_string).collect()
             });
             let pin = args.get("pin").and_then(Value::as_bool);
-            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, pin, false)
+            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, pin, str_arg("description"), false)
         }
         "ingest" => {
             let level = match str_arg("level").as_deref() {
@@ -291,17 +295,18 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             )
         }
         "unlock_section" => {
+            if !args.get("user_approved").and_then(Value::as_bool).unwrap_or(false) {
+                return Err(anyhow!(
+                    "refusing to unlock: pass user_approved=true only after the user explicitly approved editing this section in the current conversation"
+                ));
+            }
             let minutes = args.get("minutes").and_then(Value::as_u64).unwrap_or(15);
-            let mut w = resolve()?;
-            commands::unlock(&mut w, &require("section")?, minutes, false)
+            commands::unlock(&resolve()?, &require("section")?, minutes, false)
         }
-        "lock_section" => {
-            let mut w = resolve()?;
-            commands::lock(&mut w, &require("section")?, false)
-        }
+        "lock_section" => commands::lock(&resolve()?, &require("section")?, false),
         "doctor" => {
             let fix = args.get("fix").and_then(Value::as_bool).unwrap_or(false);
-            commands::doctor(&resolve()?, fix, false)
+            commands::doctor(&resolve()?, fix, false).map(|(report, _)| report)
         }
         _ => Err(anyhow!("unknown tool: {name}")),
     }

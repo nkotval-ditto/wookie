@@ -26,9 +26,6 @@ pub struct WikiConfig {
     /// defaults apply (kept last: TOML wants tables after plain values).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub sections: std::collections::BTreeMap<String, SectionConfig>,
-    /// Active temporary unlocks: section -> RFC3339 expiry. Tool-owned.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub unlocks: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -97,6 +94,12 @@ pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
     ])
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct UnlockState {
+    #[serde(default)]
+    unlocks: std::collections::BTreeMap<String, String>,
+}
+
 pub struct Wiki {
     pub slug: String,
     pub dir: PathBuf,
@@ -152,40 +155,57 @@ pub fn open(home: &Path, slug: &str) -> Result<Wiki> {
     })
 }
 
+/// Every wiki under home (a dir containing wookie.toml). This, not the
+/// global config, is the source of truth for what exists.
+pub fn all_wikis(home: &Path) -> Vec<String> {
+    let mut slugs: Vec<String> = std::fs::read_dir(home)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().join("wookie.toml").exists())
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    slugs.sort();
+    slugs
+}
+
 pub fn resolve(home: &Path, flag: Option<&str>, cwd: &Path) -> Result<Wiki> {
     if let Some(slug) = flag {
         return open(home, slug);
     }
-    let global = GlobalConfig::load(home)?;
+    // Each wiki's own wookie.toml project_roots decide resolution, so
+    // editing roots (or `wookie roots --add`) takes effect immediately.
+    let mut wikis = vec![];
+    for slug in all_wikis(home) {
+        if let Ok(w) = open(home, &slug) {
+            wikis.push(w);
+        }
+    }
 
-    let match_path = |path: &Path| -> Option<(String, usize)> {
+    let match_path = |path: &Path| -> Option<usize> {
         let path = canon(path);
-        let mut best: Option<(String, usize)> = None;
-        for (slug, entry) in &global.wikis {
-            for root in &entry.project_roots {
+        let mut best: Option<(usize, usize)> = None; // (wiki idx, depth)
+        for (i, w) in wikis.iter().enumerate() {
+            for root in &w.config.project_roots {
                 let root = canon(Path::new(root));
                 if path.starts_with(&root) {
                     let depth = root.components().count();
-                    if best.as_ref().map_or(true, |(_, d)| depth > *d) {
-                        best = Some((slug.clone(), depth));
+                    if best.map_or(true, |(_, d)| depth > d) {
+                        best = Some((i, depth));
                     }
                 }
             }
         }
-        best
+        best.map(|(i, _)| i)
     };
 
-    if let Some((slug, _)) = match_path(cwd) {
-        return open(home, &slug);
-    }
-    // Worktree fallback: match the main checkout's path instead.
-    if let Some(main) = git_main_worktree(cwd) {
-        if let Some((slug, _)) = match_path(&main) {
-            return open(home, &slug);
-        }
+    let hit = match_path(cwd).or_else(|| git_main_worktree(cwd).and_then(|m| match_path(&m)));
+    if let Some(i) = hit {
+        return Ok(wikis.swap_remove(i));
     }
 
-    let known: Vec<&str> = global.wikis.keys().map(String::as_str).collect();
+    let known: Vec<&str> = wikis.iter().map(|w| w.slug.as_str()).collect();
     if known.is_empty() {
         bail!("no wikis exist yet. Create one with `wookie init` from your project directory.");
     }
@@ -216,6 +236,11 @@ pub fn validate_id(id: &str) -> Result<()> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
             bail!("page id '{id}' may only contain letters, digits, '-', '_', '.' and '/'");
+        }
+        // Lowercase-only, hard rule: on case-insensitive filesystems (macOS)
+        // 'STYLE/checks' aliases 'style/checks' and would bypass section locks.
+        if seg.chars().any(|c| c.is_ascii_uppercase()) {
+            bail!("page id '{id}' must be lowercase (did you mean '{}'?)", id.to_lowercase());
         }
     }
     Ok(())
@@ -273,7 +298,17 @@ impl Wiki {
             .collect()
     }
 
+    /// Checked save: refuses pages in locked sections. This is THE
+    /// enforcement point; command-level checks only improve error timing.
     pub fn save_page(&self, page: &mut Page, bump_updated: bool) -> Result<()> {
+        self.assert_writable(&page.id)?;
+        self.save_page_raw(page, bump_updated)
+    }
+
+    /// Unchecked save, for tool-internal mechanical operations only
+    /// (doctor frontmatter repair, mv link rewrites). Never route agent
+    /// content through this.
+    pub fn save_page_raw(&self, page: &mut Page, bump_updated: bool) -> Result<()> {
         if bump_updated {
             page.fm.updated = crate::page::today();
         }
@@ -288,6 +323,7 @@ impl Wiki {
     }
 
     pub fn delete_page(&self, id: &str) -> Result<()> {
+        self.assert_writable(id)?;
         let path = self.page_path(id)?;
         fs::remove_file(&path).with_context(|| format!("no page '{id}'"))
     }
@@ -317,10 +353,48 @@ impl Wiki {
             .with_context(|| format!("writing {}", path.display()))
     }
 
+    fn unlocks_path(&self) -> PathBuf {
+        self.dir.join(".unlocks.toml")
+    }
+
+    fn load_unlocks(&self) -> std::collections::BTreeMap<String, String> {
+        fs::read_to_string(self.unlocks_path())
+            .ok()
+            .and_then(|raw| toml::from_str::<UnlockState>(&raw).ok())
+            .map(|st| st.unlocks)
+            .unwrap_or_default()
+    }
+
+    fn save_unlocks(&self, unlocks: std::collections::BTreeMap<String, String>) -> Result<()> {
+        let raw = toml::to_string_pretty(&UnlockState { unlocks })?;
+        fs::write(self.unlocks_path(), raw)?;
+        Ok(())
+    }
+
+    /// Make sure transient/local files stay out of the wiki's git history.
+    pub fn ensure_gitignore(&self) -> Result<()> {
+        let path = self.dir.join(".gitignore");
+        let mut cur = fs::read_to_string(&path).unwrap_or_default();
+        let mut changed = false;
+        for entry in [".unlocks.toml", "pages/.obsidian/"] {
+            if !cur.lines().any(|l| l.trim() == entry) {
+                if !cur.is_empty() && !cur.ends_with('\n') {
+                    cur.push('\n');
+                }
+                cur.push_str(entry);
+                cur.push('\n');
+                changed = true;
+            }
+        }
+        if changed {
+            fs::write(&path, cur)?;
+        }
+        Ok(())
+    }
+
     /// A locked section is temporarily writable while an unlock is active.
     pub fn is_unlocked(&self, section: &str) -> bool {
-        self.config
-            .unlocks
+        self.load_unlocks()
             .get(section)
             .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
             .map(|exp| chrono::Utc::now() < exp)
@@ -347,7 +421,8 @@ impl Wiki {
         Ok(())
     }
 
-    pub fn unlock(&mut self, section: &str, minutes: u64) -> Result<String> {
+    pub fn unlock(&self, section: &str, minutes: u64) -> Result<String> {
+        let minutes = minutes.clamp(1, 24 * 60);
         let sections = self.sections();
         let Some(cfg) = sections.get(section) else {
             bail!(
@@ -358,24 +433,24 @@ impl Wiki {
         if !cfg.is_locked() {
             return Ok(format!("Section '{section}' is not locked."));
         }
-        let expiry = chrono::Utc::now() + chrono::Duration::minutes(minutes as i64);
-        self.config
-            .unlocks
-            .insert(section.to_string(), expiry.to_rfc3339());
-        // Prune expired entries while we are here.
+        let mut unlocks = self.load_unlocks();
         let now = chrono::Utc::now();
-        self.config.unlocks.retain(|_, ts| {
+        let expiry = now + chrono::Duration::minutes(minutes as i64);
+        unlocks.insert(section.to_string(), expiry.to_rfc3339());
+        unlocks.retain(|_, ts| {
             chrono::DateTime::parse_from_rfc3339(ts).map(|e| now < e).unwrap_or(false)
         });
-        self.save_config()?;
+        self.ensure_gitignore()?;
+        self.save_unlocks(unlocks)?;
         Ok(format!(
             "Unlocked section '{section}' for {minutes} min (relock early with `wookie lock {section}`)."
         ))
     }
 
-    pub fn relock(&mut self, section: &str) -> Result<String> {
-        self.config.unlocks.remove(section);
-        self.save_config()?;
+    pub fn relock(&self, section: &str) -> Result<String> {
+        let mut unlocks = self.load_unlocks();
+        unlocks.remove(section);
+        self.save_unlocks(unlocks)?;
         Ok(format!("Locked section '{section}'."))
     }
 

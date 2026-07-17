@@ -59,6 +59,9 @@ enum Cmd {
         /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
+        /// One-line description shown in tocs (default: derived from the body)
+        #[arg(long)]
+        description: Option<String>,
         /// Comma-separated project paths this page documents (used by ingest)
         #[arg(long)]
         sources: Option<String>,
@@ -81,6 +84,9 @@ enum Cmd {
         /// Remove the pin
         #[arg(long)]
         unpin: bool,
+        /// Replace the one-line description
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Delete a page
     Rm { id: String },
@@ -143,7 +149,27 @@ enum Cmd {
         /// Mechanically repair frontmatter issues
         #[arg(long)]
         fix: bool,
+        /// Exit non-zero if any issues remain (for CI)
+        #[arg(long)]
+        strict: bool,
     },
+    /// Show or edit the wiki's registered project roots
+    Roots {
+        /// Register an additional project root
+        #[arg(long)]
+        add: Option<PathBuf>,
+        /// Remove a project root
+        #[arg(long)]
+        remove: Option<PathBuf>,
+    },
+    /// Permanently delete a wiki (requires --force)
+    RemoveWiki {
+        slug: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Rename a wiki's slug
+    RenameWiki { old: String, new: String },
     /// Open the wiki as an Obsidian vault
     Obsidian {
         /// Print the obsidian:// URI instead of launching Obsidian
@@ -213,11 +239,12 @@ fn run() -> Result<()> {
         Cmd::Toc => commands::toc(&resolve()?, json)?,
         Cmd::Context => commands::context(&resolve()?, json)?,
         Cmd::Read { id, expand } => commands::read(&resolve()?, &id, expand.unwrap_or(0), json)?,
-        Cmd::New { id, title, tags, sources, pin } => {
+        Cmd::New { id, title, tags, description, sources, pin } => {
             commands::new_page(
                 &resolve()?,
                 &id,
                 title,
+                description,
                 split_csv(tags).unwrap_or_default(),
                 split_csv(sources).unwrap_or_default(),
                 pin,
@@ -225,10 +252,10 @@ fn run() -> Result<()> {
                 json,
             )?
         }
-        Cmd::Write { id, append, sources, pin, unpin } => {
+        Cmd::Write { id, append, sources, pin, unpin, description } => {
             let body = stdin_body().unwrap_or_default();
             let pin = if pin { Some(true) } else if unpin { Some(false) } else { None };
-            commands::write(&resolve()?, &id, &body, append, split_csv(sources), pin, json)?
+            commands::write(&resolve()?, &id, &body, append, split_csv(sources), pin, description, json)?
         }
         Cmd::Rm { id } => commands::rm(&resolve()?, &id, json)?,
         Cmd::Mv { old, new } => commands::mv(&resolve()?, &old, &new, json)?,
@@ -248,15 +275,22 @@ fn run() -> Result<()> {
             &paths,
             json,
         )?,
-        Cmd::Unlock { section, minutes } => {
-            let mut w = resolve()?;
-            commands::unlock(&mut w, &section, minutes, json)?
+        Cmd::Unlock { section, minutes } => commands::unlock(&resolve()?, &section, minutes, json)?,
+        Cmd::Lock { section } => commands::lock(&resolve()?, &section, json)?,
+        Cmd::Doctor { fix, strict } => {
+            let (report, issues) = commands::doctor(&resolve()?, fix, json)?;
+            if strict && issues > 0 {
+                println!("{report}");
+                std::process::exit(1);
+            }
+            report
         }
-        Cmd::Lock { section } => {
+        Cmd::Roots { add, remove } => {
             let mut w = resolve()?;
-            commands::lock(&mut w, &section, json)?
+            commands::roots(&mut w, add, remove, json)?
         }
-        Cmd::Doctor { fix } => commands::doctor(&resolve()?, fix, json)?,
+        Cmd::RemoveWiki { slug, force } => commands::remove_wiki(&home, &slug, force, json)?,
+        Cmd::RenameWiki { old, new } => commands::rename_wiki(&home, &old, &new, json)?,
         Cmd::Obsidian { print } => commands::obsidian(&resolve()?, print, json)?,
         Cmd::Plugin { cmd: PluginCmd::Install { target } } => plugins::install(target)?,
         Cmd::Serve => {

@@ -24,6 +24,16 @@ pub struct Frontmatter {
     /// their full bodies. Reserve for rules every session must follow.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
+    /// Frontmatter lines wookie doesn't own (e.g. Obsidian properties),
+    /// preserved verbatim so human edits survive agent writes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<String>,
+}
+
+/// Frontmatter values are single-line by format; strip anything that would
+/// break the block.
+fn clean(s: &str) -> String {
+    s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -79,6 +89,9 @@ impl Page {
                 let after = &rest[end + 4..];
                 for line in block.lines() {
                     let Some((key, value)) = line.split_once(':') else {
+                        if !line.trim().is_empty() {
+                            fm.extra.push(line.to_string());
+                        }
                         continue;
                     };
                     let value = value.trim();
@@ -106,7 +119,7 @@ impl Page {
                                 fm.sources = items;
                             }
                         }
-                        _ => {}
+                        _ => fm.extra.push(line.to_string()),
                     }
                 }
                 body = after.trim_start_matches('\n').to_string();
@@ -123,19 +136,29 @@ impl Page {
     /// Serialize back to the canonical on-disk format.
     pub fn render(&self) -> String {
         let mut s = String::from("---\n");
-        s.push_str(&format!("title: {}\n", self.fm.title));
-        s.push_str(&format!("description: {}\n", self.fm.description));
-        s.push_str(&format!("tags: [{}]\n", self.fm.tags.join(", ")));
-        s.push_str(&format!("created: {}\n", self.fm.created));
-        s.push_str(&format!("updated: {}\n", self.fm.updated));
+        s.push_str(&format!("title: {}\n", clean(&self.fm.title)));
+        s.push_str(&format!("description: {}\n", clean(&self.fm.description)));
+        s.push_str(&format!(
+            "tags: [{}]\n",
+            self.fm.tags.iter().map(|t| clean(t)).collect::<Vec<_>>().join(", ")
+        ));
+        s.push_str(&format!("created: {}\n", clean(&self.fm.created)));
+        s.push_str(&format!("updated: {}\n", clean(&self.fm.updated)));
         if let Some(status) = &self.fm.status {
-            s.push_str(&format!("status: {status}\n"));
+            s.push_str(&format!("status: {}\n", clean(status)));
         }
         if !self.fm.sources.is_empty() {
-            s.push_str(&format!("sources: [{}]\n", self.fm.sources.join(", ")));
+            s.push_str(&format!(
+                "sources: [{}]\n",
+                self.fm.sources.iter().map(|t| clean(t)).collect::<Vec<_>>().join(", ")
+            ));
         }
         if self.fm.pin {
             s.push_str("pin: true\n");
+        }
+        for line in &self.fm.extra {
+            s.push_str(line);
+            s.push('\n');
         }
         s.push_str("---\n\n");
         s.push_str(self.body.trim_end());
@@ -200,6 +223,7 @@ mod tests {
                 status: Some("stub".into()),
                 sources: vec!["src/retry.rs".into(), "src/backoff/".into()],
                 pin: true,
+                extra: vec![],
             },
             body: "Summary paragraph.\n\nMore detail with a [[scheduler]] link.".into(),
         };
@@ -235,6 +259,32 @@ mod tests {
     fn summary_skips_headings() {
         let p = Page::parse("x", "---\ntitle: X\n---\n\n# Heading\n\nThe real summary.\n\nMore.");
         assert_eq!(p.summary(), "The real summary.");
+    }
+
+    #[test]
+    fn unknown_frontmatter_lines_survive_roundtrip() {
+        let content = "---\ntitle: X\ndescription: d\naliases:\n  - other-name\ncssclasses: [wide]\n---\n\nBody.";
+        let p = Page::parse("x", content);
+        assert_eq!(p.fm.extra, vec!["aliases:", "  - other-name", "cssclasses: [wide]"]);
+        let rendered = p.render();
+        assert!(rendered.contains("aliases:\n  - other-name"), "got: {rendered}");
+        assert!(rendered.contains("cssclasses: [wide]"), "got: {rendered}");
+        let p2 = Page::parse("x", &rendered);
+        assert_eq!(p2.fm.extra, p.fm.extra);
+    }
+
+    #[test]
+    fn newlines_in_values_cannot_corrupt_frontmatter() {
+        let p = Page {
+            id: "x".into(),
+            fm: Frontmatter {
+                title: "evil\ntitle: injected".into(),
+                ..Default::default()
+            },
+            body: "Body.".into(),
+        };
+        let parsed = Page::parse("x", &p.render());
+        assert_eq!(parsed.fm.title, "evil title: injected");
     }
 
     #[test]

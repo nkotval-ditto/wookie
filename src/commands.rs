@@ -1,7 +1,7 @@
 //! Every wookie verb, shared by the CLI and the MCP server. Each function
 //! returns its output as a string; callers decide where it goes.
 
-use crate::config::{GlobalConfig, WikiEntry};
+use crate::config::GlobalConfig;
 use crate::page::{humanize, rewrite_links, today, Page};
 use crate::wiki::{self, Wiki};
 use anyhow::{bail, Result};
@@ -61,13 +61,14 @@ pub fn init(
         bail!("could not derive a wiki slug; pass one explicitly: wookie init <slug>");
     }
 
-    let mut global = GlobalConfig::load(home)?;
-    if global.wikis.contains_key(&slug) {
+    if wiki::all_wikis(home).contains(&slug) {
         bail!("wiki '{slug}' already exists (wookie list)");
     }
-    for (other, entry) in &global.wikis {
-        if entry.project_roots.iter().any(|r| r == &project_root) {
-            bail!("{project_root} is already registered to wiki '{other}'");
+    for other in wiki::all_wikis(home) {
+        if let Ok(w) = wiki::open(home, &other) {
+            if w.config.project_roots.iter().any(|r| r == &project_root) {
+                bail!("{project_root} is already registered to wiki '{other}'");
+            }
         }
     }
 
@@ -81,16 +82,12 @@ pub fn init(
         auto_commit: None,
         last_ingest_commit: None,
         sections: wiki::default_sections(),
-        unlocks: Default::default(),
     };
     std::fs::write(dir.join("wookie.toml"), toml::to_string_pretty(&wiki_config)?)?;
-
-    global
-        .wikis
-        .insert(slug.clone(), WikiEntry { project_roots: vec![project_root.clone()] });
-    global.save(home)?;
+    GlobalConfig::load(home)?.save(home)?;
 
     let w = wiki::open(home, &slug)?;
+    w.ensure_gitignore()?;
     w.init_git();
     let mut index = Page {
         id: "index".into(),
@@ -107,6 +104,7 @@ pub fn init(
             status: None,
             sources: vec![],
             pin: false,
+            extra: vec![],
         },
         body: format!(
             "Wiki for the project at {project_root}, managed by wookie.\n\n\
@@ -130,12 +128,12 @@ pub fn init(
 }
 
 pub fn list(home: &Path, json: bool) -> Result<String> {
-    let global = GlobalConfig::load(home)?;
-    if global.wikis.is_empty() {
+    let slugs = wiki::all_wikis(home);
+    if slugs.is_empty() {
         return Ok("No wikis yet. Run `wookie init` from a project directory.".into());
     }
     let mut rows = vec![];
-    for slug in global.wikis.keys() {
+    for slug in &slugs {
         let (pages, stubs, description, roots) = match wiki::open(home, slug) {
             Ok(w) => {
                 let pages = w.all_pages();
@@ -282,7 +280,7 @@ pub fn toc(w: &Wiki, json: bool) -> Result<String> {
 pub fn context(w: &Wiki, json: bool) -> Result<String> {
     let pages = w.all_pages();
     let stubs = pages.iter().filter(|p| p.is_stub()).count();
-    let pinned: Vec<&Page> = pages.iter().filter(|p| p.fm.pin).collect();
+    let pinned: Vec<&Page> = pages.iter().filter(|p| p.fm.pin && !p.is_stub()).collect();
     if json {
         let mut v = grouped_json(w);
         v["wiki"] = serde_json::json!(w.slug);
@@ -381,6 +379,7 @@ pub fn new_page(
     w: &Wiki,
     id: &str,
     title: Option<String>,
+    description: Option<String>,
     tags: Vec<String>,
     sources: Vec<String>,
     pin: bool,
@@ -404,6 +403,7 @@ pub fn new_page(
             status: if has_body { None } else { Some("stub".into()) },
             sources,
             pin,
+            extra: vec![],
         },
         body: body
             .filter(|b| !b.trim().is_empty())
@@ -412,6 +412,9 @@ pub fn new_page(
     if has_body {
         page.fm.description = first_sentence(&page.summary());
     }
+    if let Some(description) = description {
+        page.fm.description = description;
+    }
     w.save_page(&mut page, false)?;
     w.commit(&format!("wookie: new {id}"));
 
@@ -419,7 +422,7 @@ pub fn new_page(
         Some(s) if w.sections().contains_key(s) => String::new(),
         _ if id == "index" => String::new(),
         _ => format!(
-            "\nNote: '{id}' is unfiled. Known sections: {}. Consider `wookie mv` into one.",
+            "\nNote: '{id}' is unfiled. Known sections: {}. Consider `wookie mv` into one (locked sections need user approval + `wookie unlock` first).",
             w.sections().keys().cloned().collect::<Vec<_>>().join(", ")
         ),
     };
@@ -450,11 +453,13 @@ pub fn write(
     append: bool,
     sources: Option<Vec<String>>,
     pin: Option<bool>,
+    description: Option<String>,
     json: bool,
 ) -> Result<String> {
     if body.trim().is_empty() {
         bail!("empty body — pipe page content via stdin (e.g. wookie write {id} <<'EOF' ... EOF)");
     }
+    wiki::validate_id(id)?;
     w.assert_writable(id)?;
     let mut page = match w.load_page(id) {
         Ok(p) => p,
@@ -476,6 +481,9 @@ pub fn write(
     }
     if page.fm.description.is_empty() || page.fm.description.starts_with("TODO") {
         page.fm.description = first_sentence(&page.summary());
+    }
+    if let Some(description) = description {
+        page.fm.description = description;
     }
     w.save_page(&mut page, true)?;
     w.commit(&format!("wookie: write {id}"));
@@ -535,7 +543,9 @@ pub fn mv(w: &Wiki, old: &str, new: &str, json: bool) -> Result<String> {
         if changed {
             let mut other = other;
             other.body = body;
-            w.save_page(&mut other, false)?;
+            // Mechanical link rewrite only; allowed even in locked sections
+            // so renames don't strand broken links behind a lock.
+            w.save_page_raw(&mut other, false)?;
             rewritten.push(other.id);
         }
     }
@@ -591,6 +601,7 @@ pub fn expand(w: &Wiki, id: Option<&str>, json: bool) -> Result<String> {
                 status: Some("stub".into()),
                 sources: vec![],
                 pin: false,
+                extra: vec![],
             },
             body: format!(
                 "TODO: fill in this page. It is linked from: {}.",
@@ -884,7 +895,7 @@ fn dir_stub_body(dir: &str, files: &[&String]) -> (String, String) {
 
 fn seed_code_stub(w: &Wiki, dir: &str, files: &[&String]) -> Result<Option<String>> {
     let id = code_page_id(dir);
-    if wiki::validate_id(&id).is_err() || w.exists(&id) {
+    if wiki::validate_id(&id).is_err() || w.exists(&id) || w.assert_writable(&id).is_err() {
         return Ok(None);
     }
     let (description, body) = dir_stub_body(dir, files);
@@ -899,6 +910,7 @@ fn seed_code_stub(w: &Wiki, dir: &str, files: &[&String]) -> Result<Option<Strin
             status: Some("stub".into()),
             sources: vec![format!("{dir}/")],
             pin: false,
+            extra: vec![],
         },
         body,
     };
@@ -1052,11 +1064,19 @@ fn ingest_fresh(w: &Wiki, root: &Path, level: IngestLevel, json: bool) -> Result
             );
         }
     }
-    let _ = writeln!(
-        out,
-        "{}. Run `wookie doctor`, fix what it reports, then record the sync point: `wookie ingest --mark`.",
-        match level { IngestLevel::Quick => 4, IngestLevel::Standard => 5, IngestLevel::Deep => 6 }
-    );
+    let last_step = match level { IngestLevel::Quick => 4, IngestLevel::Standard => 5, IngestLevel::Deep => 6 };
+    if head_commit(root).is_some() {
+        let _ = writeln!(
+            out,
+            "{last_step}. Run `wookie doctor`, fix what it reports, then record the sync point: `wookie ingest --mark`."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{last_step}. Run `wookie doctor` and fix what it reports. ({} is not a git repo, so wookie cannot track code changes; future ingests re-run fresh and `--mark` is unavailable.)",
+            root.display()
+        );
+    }
     let _ = write!(
         out,
         "\nConventions: every page's first paragraph is a standalone summary; set `--sources` to the paths a page documents so future ingests can flag it when that code changes."
@@ -1074,29 +1094,54 @@ fn ingest_update(w: &Wiki, root: &Path, base: &str, level: IngestLevel, json: bo
         return Ok(msg);
     }
 
-    // Map changed files onto pages via their sources prefixes.
-    let mut stale: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut covered: HashSet<&String> = HashSet::new();
-    for p in w.all_pages() {
+    // Map changed files onto pages via their sources prefixes. Per file,
+    // only the most specific (longest) matching prefix counts, so a change
+    // in src/scheduler/ marks code/src/scheduler stale without also
+    // dragging in the code/src parent page.
+    let pages = w.all_pages();
+    let mut matches: Vec<(&String, usize, &str)> = vec![]; // (file, prefix len, page id)
+    for p in &pages {
         for src in &p.fm.sources {
             let prefix = src.trim_end_matches('/');
             for f in &changed {
                 if f == prefix || f.starts_with(&format!("{prefix}/")) {
-                    stale.entry(p.id.clone()).or_default().push(f.clone());
-                    covered.insert(f);
+                    matches.push((f, prefix.len(), p.id.as_str()));
                 }
             }
         }
     }
+    let mut best: BTreeMap<&String, usize> = BTreeMap::new();
+    for (f, len, _) in &matches {
+        let e = best.entry(f).or_insert(0);
+        *e = (*e).max(*len);
+    }
+    let mut stale: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut covered: HashSet<&String> = HashSet::new();
+    for (f, len, id) in &matches {
+        covered.insert(f);
+        if len == &best[f] {
+            stale.entry(id.to_string()).or_default().push(f.to_string());
+        }
+    }
     let uncovered: Vec<&String> = changed.iter().filter(|f| !covered.contains(f)).collect();
 
-    // New top-level modules that appeared since last ingest get stubs.
+    // New modules that appeared since last ingest get stubs; standard/deep
+    // also look one level down, mirroring fresh-ingest seeding.
     let all_files = list_project_files(root);
     let mut seeded = vec![];
-    for (dir, dir_files) in dirs_at_depth(&all_files, 1) {
-        if uncovered.iter().any(|f| f.starts_with(&format!("{dir}/"))) {
-            if let Some(id) = seed_code_stub(w, &dir, &dir_files)? {
-                seeded.push(id);
+    let mut depths = vec![1];
+    if level != IngestLevel::Quick {
+        depths.push(2);
+    }
+    for depth in depths {
+        for (dir, dir_files) in dirs_at_depth(&all_files, depth) {
+            if depth == 2 && dir_files.len() < 3 {
+                continue;
+            }
+            if uncovered.iter().any(|f| f.starts_with(&format!("{dir}/"))) {
+                if let Some(id) = seed_code_stub(w, &dir, &dir_files)? {
+                    seeded.push(id);
+                }
             }
         }
     }
@@ -1148,9 +1193,15 @@ fn ingest_update(w: &Wiki, root: &Path, base: &str, level: IngestLevel, json: bo
             "\nChanged but not covered by any page's sources: {shown}{more}\nIf any deserve documentation, add pages for them (with --sources)."
         );
     }
+    let deep_step = if level == IngestLevel::Deep {
+        "\n3. For heavily changed files, add or update per-file sub-pages under their module's code/ path."
+    } else {
+        ""
+    };
     let _ = write!(
         out,
-        "\nWorklist — do these now:\n1. For each stale page: `wookie read <id>`, review the changed files (git diff {base} -- <files>), update the page with `wookie write <id>`.\n2. Fill any seeded stubs.\n3. Run `wookie doctor`, then record the new sync point: `wookie ingest --mark`.",
+        "\nWorklist — do these now:\n1. For each stale page: `wookie read <id>`, review the changed files (git diff {base} -- <files>), update the page with `wookie write <id>`.\n2. Fill any seeded stubs.{deep_step}\n{}. Run `wookie doctor`, then record the new sync point: `wookie ingest --mark`.",
+        if level == IngestLevel::Deep { 4 } else { 3 }
     );
     Ok(out.trim_end().to_string())
 }
@@ -1166,18 +1217,16 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
-pub fn unlock(w: &mut Wiki, section: &str, minutes: u64, json: bool) -> Result<String> {
+pub fn unlock(w: &Wiki, section: &str, minutes: u64, json: bool) -> Result<String> {
     let msg = w.unlock(section, minutes)?;
-    w.commit(&format!("wookie: unlock {section}"));
     if json {
         return Ok(serde_json::json!({"section": section, "minutes": minutes}).to_string());
     }
     Ok(msg)
 }
 
-pub fn lock(w: &mut Wiki, section: &str, json: bool) -> Result<String> {
+pub fn lock(w: &Wiki, section: &str, json: bool) -> Result<String> {
     let msg = w.relock(section)?;
-    w.commit(&format!("wookie: lock {section}"));
     if json {
         return Ok(serde_json::json!({"section": section, "locked": true}).to_string());
     }
@@ -1218,13 +1267,32 @@ pub fn critique(
                 root.display()
             );
         }
-        let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        let mut files: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(str::to_string)
             .filter(|l| !l.is_empty())
             .collect();
+        // Untracked files are the most common critique target; a plain
+        // `git diff` never shows them.
+        if !staged {
+            if let Ok(unt) = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["ls-files", "--others", "--exclude-standard"])
+                .output()
+            {
+                files.extend(
+                    String::from_utf8_lossy(&unt.stdout)
+                        .lines()
+                        .map(str::to_string)
+                        .filter(|l| !l.is_empty()),
+                );
+            }
+        }
+        files.sort();
+        files.dedup();
         let view = range.join(" ").replace("--name-only ", "");
-        (label, files, format!("git -C {} {view}", root.display()))
+        (label, files, format!("git -C {} {view} (plus untracked files: read them directly)", root.display()))
     };
 
     // Rules sections, optionally narrowed to one.
@@ -1304,6 +1372,83 @@ pub fn critique(
     Ok(out.trim_end().to_string())
 }
 
+/// List or edit the wiki's project roots (the resolution source of truth).
+pub fn roots(
+    w: &mut Wiki,
+    add: Option<PathBuf>,
+    remove: Option<PathBuf>,
+    json: bool,
+) -> Result<String> {
+    if let Some(path) = add {
+        let path = path.canonicalize().unwrap_or(path).to_string_lossy().to_string();
+        if !w.config.project_roots.contains(&path) {
+            w.config.project_roots.push(path);
+            w.save_config()?;
+        }
+    }
+    if let Some(path) = remove {
+        let path = path.canonicalize().unwrap_or(path).to_string_lossy().to_string();
+        let before = w.config.project_roots.len();
+        w.config.project_roots.retain(|r| r != &path);
+        if w.config.project_roots.len() == before {
+            bail!(
+                "{path} is not a project root of '{}' (current: {})",
+                w.slug,
+                w.config.project_roots.join(", ")
+            );
+        }
+        w.save_config()?;
+    }
+    if json {
+        return Ok(serde_json::json!({"wiki": w.slug, "project_roots": w.config.project_roots}).to_string());
+    }
+    Ok(format!(
+        "Project roots of '{}':\n{}",
+        w.slug,
+        w.config
+            .project_roots
+            .iter()
+            .map(|r| format!("- {r}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+
+pub fn remove_wiki(home: &Path, slug: &str, force: bool, json: bool) -> Result<String> {
+    let w = wiki::open(home, slug)?;
+    if !force {
+        bail!(
+            "this permanently deletes wiki '{slug}' and its {} page(s) at {} — rerun with --force to confirm",
+            w.page_ids().len(),
+            w.dir.display()
+        );
+    }
+    std::fs::remove_dir_all(&w.dir)?;
+    if json {
+        return Ok(serde_json::json!({"removed": slug}).to_string());
+    }
+    Ok(format!("Removed wiki '{slug}' ({}).", w.dir.display()))
+}
+
+pub fn rename_wiki(home: &Path, old: &str, new: &str, json: bool) -> Result<String> {
+    let new = slugify(new);
+    if new.is_empty() {
+        bail!("new slug is empty after slugification");
+    }
+    let mut w = wiki::open(home, old)?;
+    if wiki::all_wikis(home).contains(&new) {
+        bail!("wiki '{new}' already exists");
+    }
+    std::fs::rename(&w.dir, home.join(&new))?;
+    w.dir = home.join(&new);
+    w.config.name = new.clone();
+    w.save_config()?;
+    if json {
+        return Ok(serde_json::json!({"from": old, "to": new}).to_string());
+    }
+    Ok(format!("Renamed wiki '{old}' -> '{new}'."))
+}
+
 fn obsidian_app_config() -> PathBuf {
     let home = crate::config::user_home();
     #[cfg(target_os = "macos")]
@@ -1311,7 +1456,10 @@ fn obsidian_app_config() -> PathBuf {
     #[cfg(target_os = "linux")]
     return home.join(".config/obsidian/obsidian.json");
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    return home.join(".obsidian/obsidian.json");
+    return std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or(home)
+        .join("obsidian/obsidian.json");
 }
 
 fn fnv1a_hex(s: &str) -> String {
@@ -1381,13 +1529,11 @@ pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
     let newly_registered = register_obsidian_vault(&vault).unwrap_or(false);
 
     #[cfg(target_os = "macos")]
-    let opener = "open";
+    let status = std::process::Command::new("open").arg(&uri).status();
     #[cfg(target_os = "linux")]
-    let opener = "xdg-open";
+    let status = std::process::Command::new("xdg-open").arg(&uri).status();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let opener = "open";
-
-    let status = std::process::Command::new(opener).arg(&uri).status();
+    let status = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(&uri).status();
     match status {
         Ok(s) if s.success() => {
             let mut out = format!("Opened wiki '{}' in Obsidian: {}", w.slug, vault.display());
@@ -1402,7 +1548,7 @@ pub fn obsidian(w: &Wiki, print_only: bool, json: bool) -> Result<String> {
     }
 }
 
-pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
+pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<(String, usize)> {
     let mut issues: Vec<String> = vec![];
     let mut fixed: Vec<String> = vec![];
     let pages = w.all_pages();
@@ -1418,7 +1564,7 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
         if p.fm.created.is_empty() {
             if fix {
                 let mut p2 = p.clone();
-                w.save_page(&mut p2, true)?;
+                w.save_page_raw(&mut p2, true)?;
                 fixed.push(format!("normalized frontmatter of '{}'", p.id));
             } else {
                 issues.push(format!("missing/invalid frontmatter: '{}'", p.id));
@@ -1469,11 +1615,11 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
     }
 
     if json {
-        return Ok(serde_json::json!({"issues": issues, "fixed": fixed}).to_string());
+        return Ok((serde_json::json!({"issues": issues, "fixed": fixed}).to_string(), issues.len()));
     }
     let mut out = String::new();
     if issues.is_empty() && fixed.is_empty() {
-        return Ok(format!("Wiki '{}' is healthy: {} pages, no issues.", w.slug, pages.len()));
+        return Ok((format!("Wiki '{}' is healthy: {} pages, no issues.", w.slug, pages.len()), 0));
     }
     for f in &fixed {
         let _ = writeln!(out, "fixed: {f}");
@@ -1486,5 +1632,5 @@ pub fn doctor(w: &Wiki, fix: bool, json: bool) -> Result<String> {
         "\n{} issue(s). Broken links: `wookie expand`. Stubs/summaries: `wookie write <id>`. Orphans: link them from a related page.",
         issues.len()
     );
-    Ok(out.trim_end().to_string())
+    Ok((out.trim_end().to_string(), issues.len()))
 }

@@ -16,7 +16,8 @@ MCP; humans get the same commands.
       internals/retry-policy.md   # subdirs allowed; id = path sans .md
 ```
 
-- Page id = relative path under `pages/` without `.md`
+- Page id = relative path under `pages/` without `.md`, lowercase-only
+  (case-insensitive filesystems would otherwise alias ids past section locks)
 - Each wiki is a git repo (`wookie init` runs `git init`; mutations
   auto-commit, best-effort and silent on failure)
 - Wikis live outside project checkouts, so one wiki per project regardless of
@@ -25,7 +26,9 @@ MCP; humans get the same commands.
 ## Wiki resolution
 
 1. `--wiki <slug>` flag (CLI) or `wiki` param (MCP)
-2. cwd prefix match against registered `project_roots` (longest wins)
+2. cwd prefix match against `project_roots` (longest wins). Each wiki's own
+   wookie.toml is the source of truth; the global config.toml only carries
+   defaults. Edit roots with `wookie roots --add/--remove`
 3. Worktree fallback: `git rev-parse --git-common-dir` gives the main
    checkout's path; match that instead. Any linked worktree resolves to the
    main checkout's wiki. Skipped silently outside git
@@ -54,7 +57,9 @@ Body. Links: [[scheduler]] or [[internals/retry-policy|display text]].
 ```
 
 - Frontmatter is tool-owned: timestamps bump on write, `status: stub` marks
-  unfilled pages, writing real content clears it
+  unfilled pages, writing real content clears it. Unknown frontmatter lines
+  (e.g. Obsidian properties) round-trip untouched, and values are sanitized
+  so they cannot break the block
 - Wikilinks inside code fences or inline code spans are ignored (that is how
   pages document link syntax)
 - Parsing is lenient; malformed frontmatter is a doctor finding, not a crash
@@ -101,16 +106,19 @@ default for style and workflow). Rules sections get three behaviors:
   verify its rules (scope, procedure, violations, exceptions). Doctor flags
   its absence; critique falls back to judgment and says so.
 - `wookie critique [--section s] [--since ref] [--staged] [--paths ...]`:
-  assembles a briefing (target files from git or explicit paths, each rules
-  section's checks page + rule page bodies, and an output contract:
+  assembles a briefing (target files from git, including untracked files,
+  or explicit paths, each rules section's checks page + rule page bodies,
+  and an output contract:
   severity | rule id | file:line | problem | fix, verdict per section). The
   agent executes the briefing; wookie only gathers. Read-only, never a gate.
 - Locks: rules sections are locked by default (`locked` overrides per
-  section). Mutations (new/write/rm/mv, expand stubs) into a locked section
-  fail with instructions to get user permission. `wookie unlock <section>
-  [--minutes N]` (default 15) opens a temporary window recorded in
-  wookie.toml `[unlocks]` with an RFC3339 expiry; `wookie lock` relocks
-  early. Enforcement is layered: hard failure in the tool, a distinct unlock
+  section). Enforcement lives in the storage layer (`save_page`/
+  `delete_page`), so every mutation path is covered; `save_page_raw` exists
+  only for tool-internal mechanical operations (doctor frontmatter repair,
+  mv link rewrites). `wookie unlock <section> [--minutes N]` (default 15,
+  capped at 24h) opens a temporary window recorded in the gitignored
+  `.unlocks.toml` with an RFC3339 expiry; `wookie lock` relocks early. Over
+  MCP, unlock_section additionally requires `user_approved: true`. Enforcement is layered: hard failure in the tool, a distinct unlock
   command the harness's permission prompt surfaces to the human, guidance
   that forbids unprompted unlocking, and auto-expiry against dangling
   unlocks. wookie cannot verify consent itself; the layers make silent rule
@@ -163,6 +171,13 @@ Both generated from `templates/guidance.md` so guidance never drifts:
 The guidance teaches: `context` at task start, `read --expand` before
 answering, capture durable knowledge, `expand` + fill stubs, `doctor` before
 finishing.
+
+## Lifecycle and CI
+
+- `wookie roots [--add/--remove <path>]` edits a wiki's project roots
+- `wookie rename-wiki <old> <new>` / `wookie remove-wiki <slug> --force`
+- `wookie doctor --strict` exits non-zero when issues remain (CI gate)
+- `--description` on new/write sets or refreshes the toc line explicitly
 
 ## Non-goals for v0.1
 

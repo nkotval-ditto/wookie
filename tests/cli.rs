@@ -379,6 +379,183 @@ fn pinned_pages_inline_in_context() {
 }
 
 #[test]
+fn uppercase_ids_rejected_no_case_bypass() {
+    let env = Env::new();
+    env.ok(&["init", "casey"], None);
+    env.ok(&["unlock", "style"], None);
+    env.ok(&["new", "style/checks"], Some("The real rule."));
+    env.ok(&["lock", "style"], None);
+
+    // The APFS attack: STYLE/checks aliases style/checks on macOS.
+    let (success, _, stderr) = env.run(&["write", "STYLE/checks"], Some("overwritten"));
+    assert!(!success, "case-variant write must fail");
+    assert!(stderr.contains("lowercase"), "got: {stderr}");
+    let (success, _, _) = env.run(&["new", "Style/naming"], Some("x"));
+    assert!(!success, "case-variant create must fail");
+
+    let page = env.ok(&["read", "style/checks"], None);
+    assert!(page.contains("The real rule."), "locked page must be intact: {page}");
+}
+
+#[test]
+fn critique_sees_untracked_files() {
+    let env = Env::new();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&env.project)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    std::fs::write(env.project.join("main.rs"), "fn main() {}").unwrap();
+    git(&["add", "-A"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    env.ok(&["init", "untracky"], None);
+
+    // A brand-new file, never git-added.
+    std::fs::write(env.project.join("brand_new.rs"), "fn f() {}").unwrap();
+    let out = env.ok(&["critique"], None);
+    assert!(out.contains("brand_new.rs"), "untracked file missing from target: {out}");
+}
+
+#[test]
+fn doctor_strict_exits_nonzero() {
+    let env = Env::new();
+    env.ok(&["init", "stricty"], None);
+    env.ok(&["new", "solo"], Some("Links to [[nowhere]]."));
+    let (success, stdout, _) = env.run(&["doctor", "--strict"], None);
+    assert!(!success, "strict doctor must fail on issues");
+    assert!(stdout.contains("issue"), "report still printed: {stdout}");
+    let (success, _, _) = env.run(&["doctor"], None);
+    assert!(success, "non-strict doctor still exits 0");
+}
+
+#[test]
+fn roots_edit_resolution_source_of_truth() {
+    let env = Env::new();
+    env.ok(&["init", "rooty"], None);
+
+    // Second project dir, registered via roots --add on the wiki's own toml.
+    let other = env.home.parent().unwrap().join("other-proj");
+    std::fs::create_dir_all(&other).unwrap();
+    env.ok(&["roots", "--add", other.to_str().unwrap()], None);
+
+    // Resolution from the new root works with no global registry involved.
+    let (success, stdout, stderr) = env.run_in(&other, &["context"], None);
+    assert!(success, "resolution from added root failed: {stderr}");
+    assert!(stdout.contains("rooty"));
+
+    let out = env.ok(&["roots", "--remove", other.to_str().unwrap()], None);
+    assert!(!out.contains("other-proj"), "root should be gone: {out}");
+}
+
+#[test]
+fn wiki_lifecycle_rename_and_remove() {
+    let env = Env::new();
+    env.ok(&["init", "old-name"], None);
+    env.ok(&["rename-wiki", "old-name", "new-name"], None);
+    let out = env.ok(&["list"], None);
+    assert!(out.contains("new-name") && !out.contains("old-name"), "got: {out}");
+
+    // remove-wiki refuses without --force.
+    let (success, _, stderr) = env.run(&["remove-wiki", "new-name"], None);
+    assert!(!success);
+    assert!(stderr.contains("--force"), "got: {stderr}");
+    env.ok(&["remove-wiki", "new-name", "--force"], None);
+    let out = env.ok(&["list"], None);
+    assert!(out.contains("No wikis yet"), "got: {out}");
+}
+
+#[test]
+fn unlock_state_lives_outside_config_and_history() {
+    let env = Env::new();
+    env.ok(&["init", "stately"], None);
+    env.ok(&["unlock", "style"], None);
+    assert!(env.home.join("stately/.unlocks.toml").exists());
+    let cfg = std::fs::read_to_string(env.home.join("stately/wookie.toml")).unwrap();
+    assert!(!cfg.contains("unlocks"), "unlock state leaked into wookie.toml: {cfg}");
+    let gi = std::fs::read_to_string(env.home.join("stately/.gitignore")).unwrap();
+    assert!(gi.contains(".unlocks.toml"), "gitignore missing entry: {gi}");
+}
+
+#[test]
+fn ingest_on_non_git_project_says_so() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.project.join("src")).unwrap();
+    std::fs::write(env.project.join("src/a.py"), "x = 1").unwrap();
+    std::fs::write(env.project.join("README.md"), "# p").unwrap();
+    env.ok(&["init", "nogit"], None);
+    let out = env.ok(&["ingest"], None);
+    assert!(!out.contains("record the sync point"), "must not instruct --mark on non-git: {out}");
+    assert!(out.contains("not a git repo"), "should explain the limitation: {out}");
+}
+
+#[test]
+fn mcp_protocol_smoke() {
+    use std::io::Write;
+    let env = Env::new();
+    env.ok(&["init", "mcpy"], None);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wookie"))
+        .arg("serve")
+        .env("WOOKIE_HOME", &env.home)
+        .current_dir(&env.project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    write!(
+        stdin,
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wiki_list","arguments":{}}}"#,
+    )
+    .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "notification must get no response");
+    assert_eq!(lines[0]["result"]["serverInfo"]["name"], "wookie");
+    assert!(lines[1]["result"]["tools"].as_array().unwrap().len() >= 12);
+    assert_eq!(lines[2]["result"]["isError"], false);
+    assert!(lines[2]["result"]["content"][0]["text"].as_str().unwrap().contains("mcpy"));
+
+    // unlock_section without user_approved must refuse.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wookie"))
+        .arg("serve")
+        .env("WOOKIE_HOME", &env.home)
+        .current_dir(&env.project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    write!(
+        stdin,
+        "{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unlock_section","arguments":{"section":"style","wiki":"mcpy"}}}"#,
+    )
+    .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).lines().next().unwrap()).unwrap();
+    assert_eq!(v["result"]["isError"], true);
+    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("user_approved"));
+}
+
+#[test]
 fn obsidian_prepares_vault_and_prints_uri() {
     let env = Env::new();
     env.ok(&["init", "obsi"], None);

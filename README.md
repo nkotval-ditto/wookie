@@ -76,7 +76,9 @@ wookie search <query> [--tag]  regex search over ids/titles/tags/bodies
 wookie links <id>              outlinks + backlinks
 wookie critique [--since ref]  briefing to check changes against rules sections
 wookie unlock/lock <section>   temporary write access to a locked section
-wookie doctor [--fix]          health check
+wookie doctor [--fix|--strict] health check (--strict exits non-zero for CI)
+wookie roots [--add|--remove]  show or edit the wiki's project roots
+wookie rename-wiki / remove-wiki  wiki lifecycle
 wookie obsidian [--print]      open the wiki as an Obsidian vault
 wookie plugin install claude|codex
 wookie serve                   MCP server over stdio

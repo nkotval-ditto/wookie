@@ -9,6 +9,10 @@ main checkout's wiki). Nothing lives inside the repo itself.
 
 - Starting a task on a project: run `wookie context` once. If a wiki exists you
   get every page with a one-line description; skim it before exploring code.
+- After context, start a coordination session with `wookie session start
+  --agent <agent>` and retain the returned id for the task. Poll `wookie
+  notifications --session <id>` at meaningful checkpoints so concurrent
+  agents can alert you to overlapping work, decisions, blockers, or handoffs.
 - Answering questions about the project: `wookie read <id> --expand` first.
   `--expand` inlines the summary of every linked page, so one command usually
   gives full context.
@@ -21,6 +25,11 @@ main checkout's wiki). Nothing lives inside the repo itself.
 
 ```
 wookie context                 # digest: all pages + descriptions (start here)
+wookie session start --agent A # start coordination; retain the returned id
+wookie notifications --session ID # compact unread notices from other sessions
+wookie notification read N --session ID # read relevant notice + mark read
+wookie notification dismiss N --session ID # dismiss irrelevant notice
+wookie notify --session ID --summary "..." # tell other sessions what changed
 wookie read <id> [--expand]    # read a page; --expand inlines linked summaries
 wookie search <query>          # case-insensitive regex over ids/titles/tags/bodies
 wookie links <id>              # outlinks + backlinks
@@ -133,3 +142,21 @@ prints — the command only scaffolds; you do the reading and writing.
 3. Fill each stub you have knowledge for: `wookie read <id>` to see what links
    to it, then pipe a body with `wookie write <id>`. Writing clears the stub.
 4. Leave stubs you can't fill; they are honest TODOs for the next session.
+
+## Coordinating concurrent agent sessions
+
+Sessions are operational history under the wiki's `sessions/` directory, not
+curated pages. At task start, create one session and keep its id. Poll for
+unread notifications before editing shared files, before committing or handing
+off, and after a substantial tool-heavy phase.
+
+Notification listings intentionally contain only compact metadata. Judge
+relevance from the summary, kind, importance, and affected paths. Read relevant
+items with `wookie notification read`; dismiss irrelevant ones so they do not
+repeat. Publish a notification after meaningful changes, decisions, blockers,
+or handoffs. Put a short summary in `--summary`, affected files in `--paths`,
+and pipe fuller Markdown details only when they help another agent act.
+
+Close the session with `wookie session close <id>` when the task is complete.
+Notifications cannot interrupt a running agent by themselves; the skill's
+checkpoint polling is the delivery mechanism.

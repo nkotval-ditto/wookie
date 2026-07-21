@@ -69,7 +69,11 @@ pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
     std::collections::BTreeMap::from([
         (
             "architecture".to_string(),
-            s("System structure, boundaries, how subsystems interact", Info, &["overview"]),
+            s(
+                "System structure, boundaries, how subsystems interact",
+                Info,
+                &["overview"],
+            ),
         ),
         (
             "code".to_string(),
@@ -77,11 +81,19 @@ pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
         ),
         (
             "decisions".to_string(),
-            s("Why things are the way they are, one page per decision", Info, &[]),
+            s(
+                "Why things are the way they are, one page per decision",
+                Info,
+                &[],
+            ),
         ),
         (
             "guides".to_string(),
-            s("How to do common tasks: build, test, release, debug", Info, &[]),
+            s(
+                "How to do common tasks: build, test, release, debug",
+                Info,
+                &[],
+            ),
         ),
         (
             "style".to_string(),
@@ -89,7 +101,11 @@ pub fn default_sections() -> std::collections::BTreeMap<String, SectionConfig> {
         ),
         (
             "workflow".to_string(),
-            s("How to commit, branch, PR, review and release; team process rules", Rules, &[]),
+            s(
+                "How to commit, branch, PR, review and release; team process rules",
+                Rules,
+                &[],
+            ),
         ),
     ])
 }
@@ -133,6 +149,7 @@ fn canon(p: &Path) -> PathBuf {
 }
 
 pub fn open(home: &Path, slug: &str) -> Result<Wiki> {
+    validate_slug(slug)?;
     let dir = home.join(slug);
     let cfg_path = dir.join("wookie.toml");
     if !cfg_path.exists() {
@@ -141,8 +158,24 @@ pub fn open(home: &Path, slug: &str) -> Result<Wiki> {
             dir.display()
         );
     }
-    let raw = fs::read_to_string(&cfg_path)
-        .with_context(|| format!("reading {}", cfg_path.display()))?;
+    // A wiki must be a real, direct child of WOOKIE_HOME. Besides rejecting
+    // `..` and absolute paths above, this prevents a symlink named like a wiki
+    // from redirecting reads, writes, or `remove-wiki` outside the home.
+    let canonical_home = home
+        .canonicalize()
+        .with_context(|| format!("resolving wookie home {}", home.display()))?;
+    let canonical_dir = dir
+        .canonicalize()
+        .with_context(|| format!("resolving wiki directory {}", dir.display()))?;
+    if canonical_dir.parent() != Some(canonical_home.as_path()) {
+        bail!(
+            "wiki '{slug}' must be a direct directory under {}",
+            home.display()
+        );
+    }
+
+    let raw =
+        fs::read_to_string(&cfg_path).with_context(|| format!("reading {}", cfg_path.display()))?;
     let config: WikiConfig =
         toml::from_str(&raw).with_context(|| format!("parsing {}", cfg_path.display()))?;
     let global = GlobalConfig::load(home)?;
@@ -153,6 +186,19 @@ pub fn open(home: &Path, slug: &str) -> Result<Wiki> {
         config,
         auto_commit,
     })
+}
+
+/// Wiki slugs are directory names, never paths. Keep this validation in the
+/// storage layer so every CLI and MCP operation gets the same containment.
+pub fn validate_slug(slug: &str) -> Result<()> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+    {
+        bail!("invalid wiki slug '{slug}' — use lowercase letters, digits, '-' or '_' (no paths)");
+    }
+    Ok(())
 }
 
 /// Every wiki under home (a dir containing wookie.toml). This, not the
@@ -191,7 +237,7 @@ pub fn resolve(home: &Path, flag: Option<&str>, cwd: &Path) -> Result<Wiki> {
                 let root = canon(Path::new(root));
                 if path.starts_with(&root) {
                     let depth = root.components().count();
-                    if best.map_or(true, |(_, d)| depth > d) {
+                    if best.is_none_or(|(_, d)| depth > d) {
                         best = Some((i, depth));
                     }
                 }
@@ -240,7 +286,10 @@ pub fn validate_id(id: &str) -> Result<()> {
         // Lowercase-only, hard rule: on case-insensitive filesystems (macOS)
         // 'STYLE/checks' aliases 'style/checks' and would bypass section locks.
         if seg.chars().any(|c| c.is_ascii_uppercase()) {
-            bail!("page id '{id}' must be lowercase (did you mean '{}'?)", id.to_lowercase());
+            bail!(
+                "page id '{id}' must be lowercase (did you mean '{}'?)",
+                id.to_lowercase()
+            );
         }
     }
     Ok(())
@@ -376,7 +425,7 @@ impl Wiki {
         let path = self.dir.join(".gitignore");
         let mut cur = fs::read_to_string(&path).unwrap_or_default();
         let mut changed = false;
-        for entry in [".unlocks.toml", "pages/.obsidian/"] {
+        for entry in [".unlocks.toml", "pages/.obsidian/", "sessions/*/inbox.toml"] {
             if !cur.lines().any(|l| l.trim() == entry) {
                 if !cur.is_empty() && !cur.ends_with('\n') {
                     cur.push('\n');
@@ -438,7 +487,9 @@ impl Wiki {
         let expiry = now + chrono::Duration::minutes(minutes as i64);
         unlocks.insert(section.to_string(), expiry.to_rfc3339());
         unlocks.retain(|_, ts| {
-            chrono::DateTime::parse_from_rfc3339(ts).map(|e| now < e).unwrap_or(false)
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .map(|e| now < e)
+                .unwrap_or(false)
         });
         self.ensure_gitignore()?;
         self.save_unlocks(unlocks)?;

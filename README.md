@@ -26,6 +26,11 @@ Wikis live under `~/.wookie/`, one per project, outside any checkout:
       architecture/overview.md
       code/src/scheduler.md
       workflow/checks.md
+    sessions/
+      session-20260721-143052-7f3a/
+        session.toml
+        inbox.toml            # local read state (gitignored)
+        notifications/        # append-only Markdown notices
 ```
 
 Run `wookie init` from a project directory once. After that every command
@@ -166,12 +171,39 @@ so commit/PR rules and hard constraints reach the agent at every session
 prime while everything else stays on demand. Keep the pinned set small; it
 is paid on every prime.
 
+## Cross-session notifications
+
+`wookie session start` creates an agent identity such as
+`session-20260721-143052-7f3a`. Agents publish short Markdown notifications
+with a structured summary, kind, importance, and affected paths. Other
+sessions poll compact metadata with `wookie notifications`, then either read
+the full body or dismiss it as irrelevant.
+
+Notification files are append-only. Each receiving session's read state is
+local and gitignored, so acknowledging a message does not create wiki history.
+A new session starts caught up to prevent an old-history flood, while
+`wookie notifications --all` exposes earlier operational history explicitly.
+Delivery is cooperative polling by the installed agent guidance, not push.
+
+Detailed guides:
+
+- [Session lifecycle](docs/sessions.md)
+- [Publishing notifications](docs/notifications.md)
+- [Inbox polling and triage](docs/inbox-triage.md)
+- [Agent and MCP coordination](docs/agent-coordination.md)
+
 ## Commands
 
 ```
 wookie init [slug]             register a wiki for this project
 wookie list                    all wikis
 wookie context                 digest for priming an agent (start here)
+wookie session start --agent codex  start coordination; retain returned id
+wookie session list/show/close      inspect or finish coordination sessions
+wookie notifications --session ID   unread metadata from other sessions
+wookie notification read N --session ID  read relevant notice + mark read
+wookie notification dismiss N --session ID  suppress irrelevant notice
+wookie notify --session ID --summary "..."  publish a notice
 wookie toc                     every page + description, grouped by section
 wookie read <id> [--expand[=N]]  page, optionally with linked summaries inlined
 wookie new <id> [--title --tags --description --sources --pin]
@@ -197,7 +229,7 @@ wookie serve                   MCP server over stdio
 
 ## MCP
 
-`wookie serve` speaks MCP over stdio and mirrors the CLI as 16 tools
+`wookie serve` speaks MCP over stdio and mirrors the CLI
 (`wiki_context`, `page_read`, `page_write`, `ingest`, `critique`,
 `unlock_section`, ...). Register it in Claude Code with:
 

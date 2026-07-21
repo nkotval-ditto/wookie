@@ -14,6 +14,12 @@ MCP; humans get the same commands.
     pages/
       scheduler.md
       internals/retry-policy.md   # subdirs allowed; id = path sans .md
+    sessions/
+      session-20260721-143052-7f3a/
+        session.toml
+        inbox.toml                # local/gitignored read state
+        notifications/
+          notify-20260721-144210-a91c.md
 ```
 
 - Page id = relative path under `pages/` without `.md`, lowercase-only
@@ -157,7 +163,7 @@ mechanical part and emits a hardcoded playbook the agent executes.
 ## MCP (`wookie serve`)
 
 Newline-delimited JSON-RPC 2.0 over stdio, hand-rolled (initialize, ping,
-tools/list, tools/call). 12 tools mirroring the CLI verbs, all accepting
+tools/list, tools/call). Tools mirror the CLI verbs and accept
 optional `wiki` and `cwd` for resolution. Same command layer as the CLI.
 
 ## Plugins
@@ -167,6 +173,28 @@ Both generated from `templates/guidance.md` so guidance never drifts:
 - `wookie plugin install claude` -> `~/.claude/skills/wookie/SKILL.md`
 - `wookie plugin install codex` -> managed `<!-- wookie:start/end -->` block
   in `~/.codex/AGENTS.md`, idempotent on reinstall
+
+## Sessions and notifications
+
+`wookie session start` creates a project-scoped agent identity named
+`session-<UTC date>-<UTC time>-<unique id>`. Session metadata is durable and
+records the agent, optional label, timestamps, and active/closed status.
+
+`wookie notify` writes an append-only Markdown notification beneath the source
+session. Its TOML frontmatter records the source, one-line summary, kind
+(`code-change`, `decision`, `blocker`, `handoff`, `warning`, or `note`),
+importance, affected paths, and timestamp. The body contains optional details.
+
+`wookie notifications --session <id>` scans other sessions and returns compact
+metadata for unread items. `notification read` returns the body and marks it
+read; `notification dismiss` suppresses an irrelevant item without exposing
+the body. Inbox state is stored per receiving session and gitignored. A new
+session initializes its inbox against existing notifications, preventing an
+old-history flood; `--all` remains an explicit history view.
+
+Delivery is cooperative polling rather than push. Installed agent guidance
+polls after session start, before overlapping edits, after substantial work,
+and before commit or handoff. CLI and MCP expose the same lifecycle.
 
 The guidance teaches: `context` at task start, `read --expand` before
 answering, capture durable knowledge, `expand` + fill stubs, `doctor` before

@@ -56,5 +56,8 @@ fn install_codex() -> Result<String> {
         }
     };
     fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
-    Ok(format!("Installed Codex guidance block: {}", path.display()))
+    Ok(format!(
+        "Installed Codex guidance block: {}",
+        path.display()
+    ))
 }

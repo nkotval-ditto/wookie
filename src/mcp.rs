@@ -3,7 +3,7 @@
 //! into `commands`. Hand-rolled on purpose — the protocol surface we need is
 //! four methods, not worth an async runtime.
 
-use crate::{commands, config, wiki};
+use crate::{commands, config, sessions, wiki};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -100,6 +100,69 @@ fn tool_defs() -> Vec<Value> {
             "name": "wiki_context",
             "description": "Compact digest of a wiki: description, page list with one-line summaries, stub count. Call this first when starting work on a project.",
             "inputSchema": schema(&[], wiki_props(json!({}))),
+        }),
+        json!({
+            "name": "session_start",
+            "description": "Start an agent coordination session. Retain the returned id for polling and publishing notifications during the task.",
+            "inputSchema": schema(&[], wiki_props(json!({
+                "agent": { "type": "string", "description": "Agent host/type, such as codex or claude." },
+                "label": { "type": "string", "description": "Optional short purpose for the session." },
+            }))),
+        }),
+        json!({
+            "name": "session_list",
+            "description": "List agent coordination sessions for this wiki.",
+            "inputSchema": schema(&[], wiki_props(json!({}))),
+        }),
+        json!({
+            "name": "session_show",
+            "description": "Show one agent coordination session.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string" },
+            }))),
+        }),
+        json!({
+            "name": "session_close",
+            "description": "Mark an agent coordination session closed.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string" },
+            }))),
+        }),
+        json!({
+            "name": "notify",
+            "description": "Publish an append-only notification so other active sessions can judge whether your work affects them.",
+            "inputSchema": schema(&["session", "summary"], wiki_props(json!({
+                "session": { "type": "string", "description": "Source session id." },
+                "summary": { "type": "string", "description": "One-line relevance summary." },
+                "kind": { "type": "string", "enum": ["code-change", "decision", "blocker", "handoff", "warning", "note"] },
+                "importance": { "type": "string", "enum": ["low", "normal", "high"] },
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Affected project paths." },
+                "body": { "type": "string", "description": "Optional fuller Markdown details." },
+            }))),
+        }),
+        json!({
+            "name": "notifications",
+            "description": "Poll compact notification metadata. Defaults to unread notices from other sessions; all=true includes history.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string" },
+                "all": { "type": "boolean" },
+            }))),
+        }),
+        json!({
+            "name": "notification_read",
+            "description": "Read a notification's full body and mark it read for the receiving session.",
+            "inputSchema": schema(&["session", "id"], wiki_props(json!({
+                "session": { "type": "string", "description": "Receiving session id." },
+                "id": { "type": "string", "description": "Notification id." },
+            }))),
+        }),
+        json!({
+            "name": "notification_dismiss",
+            "description": "Mark a notification irrelevant for the receiving session without reading its full body.",
+            "inputSchema": schema(&["session", "id"], wiki_props(json!({
+                "session": { "type": "string", "description": "Receiving session id." },
+                "id": { "type": "string", "description": "Notification id." },
+            }))),
         }),
         json!({
             "name": "wiki_toc",
@@ -222,44 +285,103 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
         .unwrap_or(std::env::current_dir()?);
     let wiki_flag = str_arg("wiki");
     let resolve = || wiki::resolve(&home, wiki_flag.as_deref(), &cwd);
-    let require = |k: &str| {
-        str_arg(k).ok_or_else(|| anyhow!("missing required argument '{k}'"))
+    let require = |k: &str| str_arg(k).ok_or_else(|| anyhow!("missing required argument '{k}'"));
+    let list_arg = |k: &str| -> Vec<String> {
+        args.get(k)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
     };
 
     match name {
         "wiki_list" => commands::list(&home, false),
         "wiki_context" => commands::context(&resolve()?, false),
+        "session_start" => sessions::start(&resolve()?, str_arg("agent"), str_arg("label"), false),
+        "session_list" => sessions::list(&resolve()?, false),
+        "session_show" => sessions::show(&resolve()?, &require("session")?, false),
+        "session_close" => sessions::close(&resolve()?, &require("session")?, false),
+        "notify" => {
+            let kind = match str_arg("kind").as_deref() {
+                Some("code-change") => sessions::NotificationKind::CodeChange,
+                Some("decision") => sessions::NotificationKind::Decision,
+                Some("blocker") => sessions::NotificationKind::Blocker,
+                Some("handoff") => sessions::NotificationKind::Handoff,
+                Some("warning") => sessions::NotificationKind::Warning,
+                Some("note") | None => sessions::NotificationKind::Note,
+                Some(value) => return Err(anyhow!("invalid notification kind '{value}'")),
+            };
+            let importance = match str_arg("importance").as_deref() {
+                Some("low") => sessions::Importance::Low,
+                Some("high") => sessions::Importance::High,
+                Some("normal") | None => sessions::Importance::Normal,
+                Some(value) => return Err(anyhow!("invalid notification importance '{value}'")),
+            };
+            sessions::notify(
+                &resolve()?,
+                &require("session")?,
+                &require("summary")?,
+                kind,
+                importance,
+                list_arg("paths"),
+                str_arg("body"),
+                false,
+            )
+        }
+        "notifications" => sessions::inbox(
+            &resolve()?,
+            &require("session")?,
+            args.get("all").and_then(Value::as_bool).unwrap_or(false),
+            false,
+        ),
+        "notification_read" => {
+            sessions::read_notification(&resolve()?, &require("session")?, &require("id")?, false)
+        }
+        "notification_dismiss" => sessions::dismiss_notification(
+            &resolve()?,
+            &require("session")?,
+            &require("id")?,
+            false,
+        ),
         "wiki_toc" => commands::toc(&resolve()?, false),
         "page_read" => {
             let expand = args.get("expand").and_then(Value::as_u64).unwrap_or(0) as usize;
             commands::read(&resolve()?, &require("id")?, expand, false)
         }
-        "page_new" => {
-            let list_arg = |k: &str| -> Vec<String> {
-                args.get(k)
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                    .unwrap_or_default()
-            };
-            commands::new_page(
-                &resolve()?,
-                &require("id")?,
-                str_arg("title"),
-                str_arg("description"),
-                list_arg("tags"),
-                list_arg("sources"),
-                args.get("pin").and_then(Value::as_bool).unwrap_or(false),
-                str_arg("body"),
-                false,
-            )
-        }
+        "page_new" => commands::new_page(
+            &resolve()?,
+            &require("id")?,
+            str_arg("title"),
+            str_arg("description"),
+            list_arg("tags"),
+            list_arg("sources"),
+            args.get("pin").and_then(Value::as_bool).unwrap_or(false),
+            str_arg("body"),
+            false,
+        ),
         "page_write" => {
             let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
             let sources = args.get("sources").and_then(Value::as_array).map(|a| {
-                a.iter().filter_map(Value::as_str).map(str::to_string).collect()
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
             });
             let pin = args.get("pin").and_then(Value::as_bool);
-            commands::write(&resolve()?, &require("id")?, &require("body")?, append, sources, pin, str_arg("description"), false)
+            commands::write(
+                &resolve()?,
+                &require("id")?,
+                &require("body")?,
+                append,
+                sources,
+                pin,
+                str_arg("description"),
+                false,
+            )
         }
         "ingest" => {
             let level = match str_arg("level").as_deref() {
@@ -270,18 +392,36 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             let mark = args.get("mark").and_then(Value::as_bool).unwrap_or(false);
             let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
             let mut w = resolve()?;
-            commands::ingest(&mut w, &cwd, level, mark, full, str_arg("since").as_deref(), false)
+            commands::ingest(
+                &mut w,
+                &cwd,
+                level,
+                mark,
+                full,
+                str_arg("since").as_deref(),
+                false,
+            )
         }
         "page_move" => commands::mv(&resolve()?, &require("from")?, &require("to")?, false),
         "page_remove" => commands::rm(&resolve()?, &require("id")?, false),
         "wiki_expand" => commands::expand(&resolve()?, str_arg("id").as_deref(), false),
-        "search" => commands::search(&resolve()?, &require("query")?, str_arg("tag").as_deref(), false),
+        "search" => commands::search(
+            &resolve()?,
+            &require("query")?,
+            str_arg("tag").as_deref(),
+            false,
+        ),
         "links" => commands::links(&resolve()?, &require("id")?, false),
         "critique" => {
             let paths: Vec<String> = args
                 .get("paths")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             let staged = args.get("staged").and_then(Value::as_bool).unwrap_or(false);
             commands::critique(
@@ -295,7 +435,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             )
         }
         "unlock_section" => {
-            if !args.get("user_approved").and_then(Value::as_bool).unwrap_or(false) {
+            if !args
+                .get("user_approved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 return Err(anyhow!(
                     "refusing to unlock: pass user_approved=true only after the user explicitly approved editing this section in the current conversation"
                 ));

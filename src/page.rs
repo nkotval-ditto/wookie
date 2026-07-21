@@ -37,13 +37,18 @@ pub struct Frontmatter {
 /// Double-quote a YAML scalar. Descriptions routinely contain [[wikilinks]]
 /// and colons, which are invalid as bare YAML and break Obsidian Properties.
 fn yaml_quote(s: &str) -> String {
-    format!("\"{}\"", clean(s).replace('\\', "\\\\").replace('"', "\\\""))
+    format!(
+        "\"{}\"",
+        clean(s).replace('\\', "\\\\").replace('"', "\\\"")
+    )
 }
 
 fn unquote(v: &str) -> String {
     let v = v.trim();
     if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-        v[1..v.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
+        v[1..v.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
     } else {
         v.to_string()
     }
@@ -53,7 +58,7 @@ fn parse_inline_list(value: &str) -> Vec<String> {
     let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
     inner
         .split(',')
-        .map(|t| unquote(t))
+        .map(unquote)
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -78,7 +83,7 @@ pub fn today() -> String {
 /// Turn a page id's last segment into a human title: `retry-policy` -> `Retry Policy`.
 pub fn humanize(id: &str) -> String {
     let last = id.rsplit('/').next().unwrap_or(id);
-    last.split(|c| c == '-' || c == '_')
+    last.split(['-', '_'])
         .filter(|w| !w.is_empty())
         .map(|w| {
             let mut chars = w.chars();
@@ -126,7 +131,9 @@ impl Page {
                 let mut open_list: Option<ListKey> = None;
                 for line in block.lines() {
                     if line.starts_with([' ', '\t']) {
-                        if let (Some(key), Some(item)) = (&open_list, line.trim().strip_prefix("- ")) {
+                        if let (Some(key), Some(item)) =
+                            (&open_list, line.trim().strip_prefix("- "))
+                        {
                             let item = unquote(item);
                             match key {
                                 ListKey::Tags => fm.tags.push(item),
@@ -194,11 +201,18 @@ impl Page {
     /// Obsidian renders the Properties panel instead of raw text.
     pub fn render(&self) -> String {
         let quoted_list = |items: &[String]| {
-            items.iter().map(|t| yaml_quote(t)).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(|t| yaml_quote(t))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         let mut s = String::from("---\n");
         s.push_str(&format!("title: {}\n", yaml_quote(&self.fm.title)));
-        s.push_str(&format!("description: {}\n", yaml_quote(&self.fm.description)));
+        s.push_str(&format!(
+            "description: {}\n",
+            yaml_quote(&self.fm.description)
+        ));
         if !self.fm.aliases.is_empty() {
             s.push_str(&format!("aliases: [{}]\n", quoted_list(&self.fm.aliases)));
         }
@@ -259,8 +273,29 @@ pub fn rewrite_links(text: &str, old: &str, new: &str) -> (String, bool) {
     let plain_new = format!("[[{new}]]");
     let pipe_old = format!("[[{old}|");
     let pipe_new = format!("[[{new}|");
-    let changed = text.contains(&plain_old) || text.contains(&pipe_old);
-    let out = text.replace(&plain_old, &plain_new).replace(&pipe_old, &pipe_new);
+    let rewrite_plain_text = |segment: &str| {
+        segment
+            .replace(&plain_old, &plain_new)
+            .replace(&pipe_old, &pipe_new)
+    };
+
+    // Match link discovery semantics: examples inside inline code or fenced
+    // code blocks are literals, not graph edges, and a move must not edit them.
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    for protected in code_re().find_iter(text) {
+        let segment = &text[cursor..protected.start()];
+        let rewritten = rewrite_plain_text(segment);
+        changed |= rewritten != segment;
+        out.push_str(&rewritten);
+        out.push_str(protected.as_str());
+        cursor = protected.end();
+    }
+    let segment = &text[cursor..];
+    let rewritten = rewrite_plain_text(segment);
+    changed |= rewritten != segment;
+    out.push_str(&rewritten);
     (out, changed)
 }
 
@@ -316,7 +351,10 @@ mod tests {
 
     #[test]
     fn summary_skips_headings() {
-        let p = Page::parse("x", "---\ntitle: X\n---\n\n# Heading\n\nThe real summary.\n\nMore.");
+        let p = Page::parse(
+            "x",
+            "---\ntitle: X\n---\n\n# Heading\n\nThe real summary.\n\nMore.",
+        );
         assert_eq!(p.summary(), "The real summary.");
     }
 
@@ -332,15 +370,22 @@ mod tests {
             body: "Body.".into(),
         };
         let rendered = p.render();
-        assert!(rendered.contains(r#"description: "Keeps the [[hyperdrive]] running: fast""#), "got: {rendered}");
+        assert!(
+            rendered.contains(r#"description: "Keeps the [[hyperdrive]] running: fast""#),
+            "got: {rendered}"
+        );
         let parsed = Page::parse("x", &rendered);
         assert_eq!(parsed.fm.title, r#"The "Scheduler""#);
-        assert_eq!(parsed.fm.description, "Keeps the [[hyperdrive]] running: fast");
+        assert_eq!(
+            parsed.fm.description,
+            "Keeps the [[hyperdrive]] running: fast"
+        );
     }
 
     #[test]
     fn block_style_lists_parse_into_known_fields() {
-        let content = "---\ntitle: X\naliases:\n  - Other Name\n  - X()\ntags:\n  - core\n---\n\nBody.";
+        let content =
+            "---\ntitle: X\naliases:\n  - Other Name\n  - X()\ntags:\n  - core\n---\n\nBody.";
         let p = Page::parse("x", content);
         assert_eq!(p.fm.aliases, vec!["Other Name", "X()"]);
         assert_eq!(p.fm.tags, vec!["core"]);
@@ -351,9 +396,15 @@ mod tests {
     fn unknown_frontmatter_lines_survive_roundtrip() {
         let content = "---\ntitle: X\ndescription: d\ncustom-prop:\n  - other-name\ncssclasses: [wide]\n---\n\nBody.";
         let p = Page::parse("x", content);
-        assert_eq!(p.fm.extra, vec!["custom-prop:", "  - other-name", "cssclasses: [wide]"]);
+        assert_eq!(
+            p.fm.extra,
+            vec!["custom-prop:", "  - other-name", "cssclasses: [wide]"]
+        );
         let rendered = p.render();
-        assert!(rendered.contains("custom-prop:\n  - other-name"), "got: {rendered}");
+        assert!(
+            rendered.contains("custom-prop:\n  - other-name"),
+            "got: {rendered}"
+        );
         assert!(rendered.contains("cssclasses: [wide]"), "got: {rendered}");
         let p2 = Page::parse("x", &rendered);
         assert_eq!(p2.fm.extra, p.fm.extra);
@@ -384,9 +435,21 @@ mod tests {
 
     #[test]
     fn rewrites_links() {
-        let (out, changed) = rewrite_links("a [[old]] b [[old|text]] c [[older]]", "old", "new/place");
+        let (out, changed) =
+            rewrite_links("a [[old]] b [[old|text]] c [[older]]", "old", "new/place");
         assert!(changed);
         assert_eq!(out, "a [[new/place]] b [[new/place|text]] c [[older]]");
+    }
+
+    #[test]
+    fn rewrites_links_without_touching_code_examples() {
+        let text = "real [[old]]; inline `[[old]]`; fenced:\n```md\n[[old|example]]\n```";
+        let (out, changed) = rewrite_links(text, "old", "new/place");
+        assert!(changed);
+        assert_eq!(
+            out,
+            "real [[new/place]]; inline `[[old]]`; fenced:\n```md\n[[old|example]]\n```"
+        );
     }
 
     #[test]

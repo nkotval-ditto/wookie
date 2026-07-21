@@ -3,6 +3,7 @@ mod config;
 mod mcp;
 mod page;
 mod plugins;
+mod sessions;
 mod wiki;
 
 use anyhow::Result;
@@ -40,6 +41,40 @@ enum Cmd {
     },
     /// List all wikis
     List,
+    /// Manage an agent session used for cross-session coordination
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
+    /// Publish a short notification from this agent session
+    Notify {
+        /// Source session id returned by `wookie session start`
+        #[arg(long)]
+        session: String,
+        /// One-line description used by other agents to judge relevance
+        #[arg(long)]
+        summary: String,
+        #[arg(long, value_enum, default_value = "note")]
+        kind: sessions::NotificationKind,
+        #[arg(long, value_enum, default_value = "normal")]
+        importance: sessions::Importance,
+        /// Comma-separated project paths affected by the work
+        #[arg(long)]
+        paths: Option<String>,
+    },
+    /// List notifications visible to an agent session
+    Notifications {
+        #[arg(long)]
+        session: String,
+        /// Include already read, dismissed, and pre-existing notifications
+        #[arg(long)]
+        all: bool,
+    },
+    /// Read or dismiss one notification
+    Notification {
+        #[command(subcommand)]
+        cmd: NotificationCmd,
+    },
     /// Table of contents: every page with its description
     Toc,
     /// Compact digest of the wiki for priming an agent
@@ -186,6 +221,41 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum SessionCmd {
+    /// Start a named coordination session
+    Start {
+        /// Agent host/type, such as codex or claude
+        #[arg(long)]
+        agent: Option<String>,
+        /// Optional human-readable purpose
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List known sessions
+    List,
+    /// Show one session
+    Show { id: String },
+    /// Mark one session closed
+    Close { id: String },
+}
+
+#[derive(Subcommand)]
+enum NotificationCmd {
+    /// Read the full notification and mark it read for this session
+    Read {
+        id: String,
+        #[arg(long)]
+        session: String,
+    },
+    /// Mark an irrelevant notification dismissed without reading its body
+    Dismiss {
+        id: String,
+        #[arg(long)]
+        session: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum PluginCmd {
     /// Install the integration for an agent (claude or codex)
     Install {
@@ -232,41 +302,111 @@ fn run() -> Result<()> {
     let resolve = || wiki::resolve(&home, cli.wiki.as_deref(), &cwd);
 
     let out = match cli.cmd {
-        Cmd::Init { slug, project, description } => {
-            commands::init(&home, &cwd, slug, project, description, json)?
-        }
+        Cmd::Init {
+            slug,
+            project,
+            description,
+        } => commands::init(&home, &cwd, slug, project, description, json)?,
         Cmd::List => commands::list(&home, json)?,
+        Cmd::Session { cmd } => match cmd {
+            SessionCmd::Start { agent, label } => sessions::start(&resolve()?, agent, label, json)?,
+            SessionCmd::List => sessions::list(&resolve()?, json)?,
+            SessionCmd::Show { id } => sessions::show(&resolve()?, &id, json)?,
+            SessionCmd::Close { id } => sessions::close(&resolve()?, &id, json)?,
+        },
+        Cmd::Notify {
+            session,
+            summary,
+            kind,
+            importance,
+            paths,
+        } => sessions::notify(
+            &resolve()?,
+            &session,
+            &summary,
+            kind,
+            importance,
+            split_csv(paths).unwrap_or_default(),
+            stdin_body(),
+            json,
+        )?,
+        Cmd::Notifications { session, all } => sessions::inbox(&resolve()?, &session, all, json)?,
+        Cmd::Notification { cmd } => match cmd {
+            NotificationCmd::Read { id, session } => {
+                sessions::read_notification(&resolve()?, &session, &id, json)?
+            }
+            NotificationCmd::Dismiss { id, session } => {
+                sessions::dismiss_notification(&resolve()?, &session, &id, json)?
+            }
+        },
         Cmd::Toc => commands::toc(&resolve()?, json)?,
         Cmd::Context => commands::context(&resolve()?, json)?,
         Cmd::Read { id, expand } => commands::read(&resolve()?, &id, expand.unwrap_or(0), json)?,
-        Cmd::New { id, title, tags, description, sources, pin } => {
-            commands::new_page(
+        Cmd::New {
+            id,
+            title,
+            tags,
+            description,
+            sources,
+            pin,
+        } => commands::new_page(
+            &resolve()?,
+            &id,
+            title,
+            description,
+            split_csv(tags).unwrap_or_default(),
+            split_csv(sources).unwrap_or_default(),
+            pin,
+            stdin_body(),
+            json,
+        )?,
+        Cmd::Write {
+            id,
+            append,
+            sources,
+            pin,
+            unpin,
+            description,
+        } => {
+            let body = stdin_body().unwrap_or_default();
+            let pin = if pin {
+                Some(true)
+            } else if unpin {
+                Some(false)
+            } else {
+                None
+            };
+            commands::write(
                 &resolve()?,
                 &id,
-                title,
-                description,
-                split_csv(tags).unwrap_or_default(),
-                split_csv(sources).unwrap_or_default(),
+                &body,
+                append,
+                split_csv(sources),
                 pin,
-                stdin_body(),
+                description,
                 json,
             )?
-        }
-        Cmd::Write { id, append, sources, pin, unpin, description } => {
-            let body = stdin_body().unwrap_or_default();
-            let pin = if pin { Some(true) } else if unpin { Some(false) } else { None };
-            commands::write(&resolve()?, &id, &body, append, split_csv(sources), pin, description, json)?
         }
         Cmd::Rm { id } => commands::rm(&resolve()?, &id, json)?,
         Cmd::Mv { old, new } => commands::mv(&resolve()?, &old, &new, json)?,
         Cmd::Expand { id } => commands::expand(&resolve()?, id.as_deref(), json)?,
-        Cmd::Ingest { level, mark, full, since } => {
+        Cmd::Ingest {
+            level,
+            mark,
+            full,
+            since,
+        } => {
             let mut w = resolve()?;
             commands::ingest(&mut w, &cwd, level, mark, full, since.as_deref(), json)?
         }
         Cmd::Search { query, tag } => commands::search(&resolve()?, &query, tag.as_deref(), json)?,
         Cmd::Links { id } => commands::links(&resolve()?, &id, json)?,
-        Cmd::Critique { section, since, staged, paths } => commands::critique(
+        Cmd::Critique {
+            section,
+            since,
+            staged,
+            paths,
+        } => commands::critique(
             &resolve()?,
             &cwd,
             section.as_deref(),
@@ -292,7 +432,9 @@ fn run() -> Result<()> {
         Cmd::RemoveWiki { slug, force } => commands::remove_wiki(&home, &slug, force, json)?,
         Cmd::RenameWiki { old, new } => commands::rename_wiki(&home, &old, &new, json)?,
         Cmd::Obsidian { print } => commands::obsidian(&resolve()?, print, json)?,
-        Cmd::Plugin { cmd: PluginCmd::Install { target } } => plugins::install(target)?,
+        Cmd::Plugin {
+            cmd: PluginCmd::Install { target },
+        } => plugins::install(target)?,
         Cmd::Serve => {
             mcp::serve()?;
             String::new()

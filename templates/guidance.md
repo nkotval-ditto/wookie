@@ -7,15 +7,17 @@ main checkout's wiki). Nothing lives inside the repo itself.
 
 ## When to use it
 
-- Starting a task on a project: run `wookie context` once. If a wiki exists you
-  get every page with a one-line description; skim it before exploring code.
-- After context, start a coordination session with `wookie session start
-  --agent <agent>` and retain the returned id for the task. Poll `wookie
-  notifications --session <id>` at meaningful checkpoints so concurrent
-  agents can alert you to overlapping work, decisions, blockers, or handoffs.
+- Starting a task on a project: run `wookie prime --query "$TASK"` once, using
+  a concise description of the actual task. It returns bounded standing
+  instructions, the section map, and ranked page suggestions. Use `wookie
+  context` only when you intentionally need the exhaustive catalog.
+- If `wookie prime` resolves a wiki and coordination is enabled, start one
+  session and retain its id in `WOOKIE_SESSION`. Poll at task start, before
+  overlapping edits, and before committing or handing off. If no wiki exists
+  or `sessions.enabled` is false, continue without a session.
 - Answering questions about the project: `wookie read <id> --expand` first.
-  `--expand` inlines the summary of every linked page, so one command usually
-  gives full context.
+  `--expand` inlines a bounded set of linked summaries (depth at most 5, up to
+  100 pages), so one command usually gives enough context and reports omissions.
 - After learning something durable (architecture, a gotcha, a decision, how a
   subsystem works): capture it. Knowledge that dies with the conversation is
   the failure mode wookie exists to prevent.
@@ -24,24 +26,31 @@ main checkout's wiki). Nothing lives inside the repo itself.
 ## Commands
 
 ```
-wookie context                 # digest: all pages + descriptions (start here)
-wookie session start --agent A # start coordination; retain the returned id
-wookie notifications --session ID # compact unread notices from other sessions
-wookie notification read N --session ID # read relevant notice + mark read
-wookie notification dismiss N --session ID # dismiss irrelevant notice
-wookie notify --session ID --summary "..." # tell other sessions what changed
+wookie prime --query "$TASK"  # bounded standing rules + relevant page map
+wookie context                 # explicit exhaustive catalog
+wookie session start --agent A --id-only # create an id for WOOKIE_SESSION
+wookie notifications           # compact unread notices for WOOKIE_SESSION
+wookie notification read N     # read relevant notice + mark read
+wookie notification dismiss N  # dismiss irrelevant notice
+wookie session heartbeat       # keep a long-running session visibly active
+wookie notify --summary "..."  # tell other sessions what changed
 wookie read <id> [--expand]    # read a page; --expand inlines linked summaries
-wookie search <query>          # case-insensitive regex over ids/titles/tags/bodies
+wookie search <query>          # ranked, bounded results; --all is exhaustive
 wookie links <id>              # outlinks + backlinks
 wookie new <id> <<'EOF' ...    # create a page (body via stdin/heredoc)
 wookie write <id> <<'EOF' ...  # replace a page's body (also clears stub status)
 wookie write <id> --append     # append instead of replace
-wookie expand [<id>]           # create stubs for broken [[links]], print worklist
+wookie expand [<id>]           # create all broken-link stubs; bounded worklist
 wookie mv <old> <new>          # rename; inbound links rewritten automatically
 wookie ingest [--level L]      # sync wiki with codebase (see below)
 wookie critique [--since ref]  # check current changes against the rules sections
 wookie doctor [--fix]          # health check: broken links, orphans, stubs
+wookie status                  # concise operator health dashboard
+wookie protocol list           # discover project-scoped page scaffolds
+wookie publish --check < plan  # validate a multi-page change without mutation
+wookie rules propose < plan    # begin the reviewed rules-change lifecycle
 wookie unlock <section>        # ONLY with explicit user permission (see below)
+wookie plugin status --strict  # detect stale installed agent guidance
 wookie list / wookie init      # all wikis / register a new one for this project
 ```
 
@@ -58,6 +67,7 @@ context` shows the wiki's actual set, configurable in its wookie.toml):
 - `code/` — module-by-module reference; ingest seeds these
 - `decisions/` — why things are the way they are, one page per decision
 - `guides/` — how to do common tasks: build, test, release, debug
+- `findings/` — structured audit findings, remediation, verification evidence
 - `style/` — code style, naming, idioms, review conventions
 - `workflow/` — how to commit, branch, PR, review, release; process rules
 
@@ -86,14 +96,35 @@ propose the edit to the user and wait. After approval: `wookie unlock
 <section>`, make the edit, then `wookie lock <section>` (it also auto-relocks
 after 15 minutes).
 
+Indirect edits obey the same lock: a move that would rewrite a backlink in a
+rules page fails, and `wookie doctor --fix` will not repair a locked rules
+page. Do not treat either command as permission to unlock the section.
+
 ## Pinned pages (always-on instructions)
 
-Pages with `pin: true` are inlined in full by `wookie context`: they are the
-wiki's standing orders (commit format, PR rules, hard constraints), not
-reference material. Follow them for the whole session. Pin with
-`wookie new/write <id> --pin`, unpin with `--unpin`. Keep the pinned set
-small — a handful of short pages — or priming drowns in it. Everything else
-stays unpinned and is fetched on demand via read/search.
+Use `--pin-level instruction` for concise standing orders, `--pin-level
+summary` when only a page's first paragraph must stay visible, and `--pin-level
+discoverable` to always highlight metadata plus a `wookie read` command without
+inlining content. Legacy `--pin` means `instruction`. An instruction page may
+isolate its normative text under `## Agent instructions`; `prime` extracts that
+section. Follow returned instructions for the whole session. Instruction and
+summary pins must contain real non-stub text. Keep them short: Wookie fails
+clearly if they exceed the configured instruction budget instead of silently
+dropping rules. Discoverable pins do not consume that budget; everything else
+is fetched on demand through read/search.
+
+## Protocols and checked publication
+
+Protocols are inert, project-scoped Markdown scaffolds stored with the wiki.
+Inspect them with `wookie protocol list/show`; create a page with `wookie new
+<id> --protocol <name>`. They have no hooks or executable code and never bypass
+section locks.
+
+For a coordinated multi-page change, preview a strict manifest with `wookie
+publish --check`; mutation requires `--apply`, revalidates the reviewed base,
+and uses a rollback journal. Rules changes go through `wookie rules
+propose/review/apply`. Never pass `--user-approved` unless the user explicitly
+approved that exact rules change in the current conversation.
 
 ## Conventions (enforced by the tool; do not fight them)
 
@@ -137,8 +168,10 @@ prints — the command only scaffolds; you do the reading and writing.
 ## Growing the wiki (the expand workflow)
 
 1. While writing a page, link concepts you mention: `[[run-lifecycle]]`.
-2. Run `wookie expand` — every broken link becomes a stub page, and you get a
-   worklist of all stubs.
+2. Run `wookie expand` — every eligible broken link becomes a stub page, and
+   you get a bounded worklist with totals and omission guidance. Use
+   `--limit`/`--tokens` to tune the response; use `--all` only when you need the
+   exhaustive current stub list. Output limits never limit stub creation.
 3. Fill each stub you have knowledge for: `wookie read <id>` to see what links
    to it, then pipe a body with `wookie write <id>`. Writing clears the stub.
 4. Leave stubs you can't fill; they are honest TODOs for the next session.
@@ -146,17 +179,31 @@ prints — the command only scaffolds; you do the reading and writing.
 ## Coordinating concurrent agent sessions
 
 Sessions are operational history under the wiki's `sessions/` directory, not
-curated pages. At task start, create one session and keep its id. Poll for
-unread notifications before editing shared files, before committing or handing
-off, and after a substantial tool-heavy phase.
+curated pages. Start one only after `wookie prime` finds a wiki and
+`wookie config get sessions.enabled --effective` is true. Keep its id in the
+environment so later commands can omit `--session`:
+
+```sh
+export WOOKIE_SESSION="$(wookie session start --agent codex --id-only)"
+```
+
+Replace `codex` with the current agent name. In PowerShell, use
+`$env:WOOKIE_SESSION = (wookie session start --agent codex --id-only)`. Poll
+immediately, before editing files another session may touch, after a substantial
+tool-heavy phase, and before committing or handing off. Use `wookie session
+heartbeat` during long work that otherwise has no wookie activity.
 
 Notification listings intentionally contain only compact metadata. Judge
 relevance from the summary, kind, importance, and affected paths. Read relevant
 items with `wookie notification read`; dismiss irrelevant ones so they do not
-repeat. Publish a notification after meaningful changes, decisions, blockers,
-or handoffs. Put a short summary in `--summary`, affected files in `--paths`,
-and pipe fuller Markdown details only when they help another agent act.
+repeat. Publish after meaningful changes, decisions, blockers, or handoffs.
+Use `--to <session>` when only specific sessions need it and a stable
+`--idempotency-key` when retrying publication. Put a short summary in
+`--summary`, affected files in `--paths`, and pipe fuller Markdown details only
+when they help another agent act.
 
-Close the session with `wookie session close <id>` when the task is complete.
+Before stopping, send a `--kind handoff` notice when unfinished context matters,
+then close with `wookie session close`. After upgrading wookie, run `wookie
+plugin status --strict` and reinstall any target it reports stale or missing.
 Notifications cannot interrupt a running agent by themselves; the skill's
 checkpoint polling is the delivery mechanism.

@@ -1,36 +1,78 @@
-# Wookie usage guides
+# Wookie
 
-These guides cover Wookie's knowledge retrieval, change control,
-agent-to-agent coordination, configuration, and storage behavior.
-Coordination records live under each wiki's `sessions/` directory; wikis
-themselves live under `WOOKIE_HOME` (normally `~/.wookie`), not in the project
-checkout.
+Wookie is a local, Markdown, LLM-first knowledge base and coordination layer
+for software projects. It gives agents a compact map to durable knowledge,
+keeps rules reviewable, and lets concurrent sessions announce changes without
+putting generated files in the repository being documented.
 
-- [Retrieving knowledge](retrieval.md) — start with bounded, task-aware
-  priming; use ranked search, explicit reads, pins, and continuation cursors.
+## Start in five commands
+
+```sh
+cargo install --locked --path .
+cd /path/to/project
+wookie init
+wookie prime --query "understand the architecture"
+wookie read index --expand
+```
+
+Prime is the normal task-start surface. It returns bounded standing
+instructions, a compact section map, and ranked page suggestions. The complete
+catalog stays available through `wookie context`, but is never required just
+to begin useful work.
+
+## Where Wookie keeps data
+
+Wikis live below `WOOKIE_HOME`, normally `~/.wookie/`, and resolve from the
+current project or linked worktree. Curated pages, configuration, safe
+protocols, transaction journals, and append-only session records all stay
+outside the source checkout.
+
+The documentation website is similarly static: it has no API and no access to
+live wiki content. See [Build and self-host these docs](self-hosting.md).
+
+## Learn by workflow
+
+### Start and retrieve
+
+- [Getting started](getting-started.md) — install Wookie, register a project,
+  prime a task, and begin coordination.
+- [Retrieving knowledge](retrieval.md) — use ranked search, explicit reads,
+  pin levels, hard budgets, state hashes, and continuations.
+
+### Create and review knowledge
+
 - [Page protocols](protocols.md) — create pages from safe, namespaced,
-  project-local Markdown scaffolds, including the built-in finding protocol.
-- [Transactional publishing](publishing.md) — preview multi-page manifests,
-  apply them under one lock and journal, and recover interrupted publications.
-- [Audits and CI](audit-and-ci.md) — use revision-aware provenance checks, the
-  operator dashboard, and stable `wookie.report/v1` JSON.
-- [Rules and findings](rules-and-findings.md) — propose, review, approve, and
-  apply rules changes; track actionable findings with pages and tags.
-- [Session lifecycle](sessions.md) — start, identify, inspect, heartbeat, and
-  close agent sessions.
-- [Publishing notifications](notifications.md) — report changes, decisions,
-  blockers, warnings, and handoffs with targeting and routing metadata.
-- [Inbox triage](inbox-triage.md) — poll and filter compact metadata, read
-  relevant notifications, and dismiss irrelevant ones.
-- [Session maintenance](session-maintenance.md) — find stale sessions, preview
-  retention, and safely prune old coordination history.
-- [Configuration](configuration.md) — global defaults, sparse per-wiki
-  overrides, validation, and every coordination/history setting.
-- [Storage and concurrency](storage-and-concurrency.md) — on-disk layout,
-  append-only state, corruption handling, path containment, atomic writes, and
-  serialized Git history.
-- [Agent and MCP integration](agent-coordination.md) — polling checkpoints,
-  installed guidance, structured MCP results, and tool equivalents.
+  project-local Markdown scaffolds.
+- [Rules and findings](rules-and-findings.md) — review rule changes and track
+  findings through remediation and verification.
+- [Transactional publishing](publishing.md) — preview and atomically apply
+  coordinated multi-page changes.
+- [Audits and CI](audit-and-ci.md) — run revision-aware provenance checks and
+  consume stable `wookie.report/v1` JSON.
 
-For the complete command inventory and design, see the project
-[README](../README.md) and [specification](../SPEC.md).
+### Coordinate agents
+
+- [Session lifecycle](sessions.md) — start, inspect, heartbeat, and close
+  agent sessions.
+- [Publishing notifications](notifications.md) — report meaningful changes,
+  decisions, blockers, warnings, and handoffs.
+- [Inbox triage](inbox-triage.md) — filter compact metadata, read relevant
+  notifications, and dismiss irrelevant ones.
+- [Session maintenance](session-maintenance.md) — inspect staleness and safely
+  prune retained coordination history.
+- [Agent and MCP integration](agent-coordination.md) — install agent guidance
+  and use structured MCP equivalents.
+
+### Operate Wookie
+
+- [Configuration](configuration.md) — apply global defaults and sparse
+  per-wiki overrides within explicit safety ceilings.
+- [Storage and concurrency](storage-and-concurrency.md) — understand
+  append-only state, path containment, atomic writes, and serialized history.
+- [Build and self-host these docs](self-hosting.md) — preview locally, build
+  portable static files, or run the hardened container.
+
+For the complete source-level command inventory and invariants, see the
+[repository README](https://github.com/nkotval-ditto/wookie/blob/main/README.md)
+and
+[specification](https://github.com/nkotval-ditto/wookie/blob/main/SPEC.md).

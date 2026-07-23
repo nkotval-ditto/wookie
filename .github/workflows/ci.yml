@@ -34,6 +34,31 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+  docs:
+    name: Documentation site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate container definition
+        run: docker compose -f compose.docs.yml config --quiet
+
+      - name: Build and start documentation
+        run: docker compose -f compose.docs.yml up --build -d --wait
+
+      - name: Verify documentation routes
+        run: |
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/retrieval.html
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/self-hosting.html
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/healthz
+
+      - name: Stop documentation
+        if: always()
+        run: docker compose -f compose.docs.yml down --volumes
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

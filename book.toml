@@ -1,0 +1,34 @@
+[book]
+title = "Wookie"
+authors = ["Wookie contributors"]
+description = "Operate Wookie: a local, Markdown, LLM-first knowledge base and agent coordination tool."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/wookie-docs"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+definition-lists = true
+admonitions = true
+additional-css = ["docs/theme/wookie.css"]
+git-repository-url = "https://github.com/nkotval-ditto/wookie"
+edit-url-template = "https://github.com/nkotval-ditto/wookie/edit/main/{path}"
+site-url = "/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+heading-split-level = 2

@@ -426,6 +426,27 @@ current. Re-run `plugin install` after upgrading Wookie.
 - [Transactional publishing](docs/publishing.md)
 - [Audit and CI](docs/audit-and-ci.md)
 - [Rules and findings](docs/rules-and-findings.md)
+- [Build and self-host the documentation](docs/self-hosting.md)
+
+## Documentation site
+
+The guides form a searchable static mdBook. Preview them locally:
+
+```sh
+cargo install mdbook --version 0.5.3 --locked
+mdbook serve --hostname 127.0.0.1
+```
+
+Or build and run the included unprivileged, read-only container:
+
+```sh
+docker compose -f compose.docs.yml up --build -d --wait
+```
+
+The site is available at `http://localhost:8080`. It contains product
+documentation only and never mounts or exposes live data from `~/.wookie`.
+See [the self-hosting guide](docs/self-hosting.md) for static deployment,
+reverse-proxy, update, and security guidance.
 
 ## Development and CI
 
@@ -433,8 +454,10 @@ current. Re-run `plugin install` after upgrading Wookie.
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
+mdbook build
 ```
 
 GitHub Actions runs format and Clippy checks on Linux and the full test suite
-on Linux, macOS, and Windows. See [SPEC.md](SPEC.md) for the precise model and
-invariants.
+on Linux, macOS, and Windows. It also builds and boots the documentation
+container, checks representative routes, and validates its health endpoint.
+See [SPEC.md](SPEC.md) for the precise model and invariants.

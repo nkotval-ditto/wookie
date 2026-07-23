@@ -1,0 +1,7 @@
+*
+!book.toml
+!docs/
+!docs/**
+!deploy/
+!deploy/docs/
+!deploy/docs/**

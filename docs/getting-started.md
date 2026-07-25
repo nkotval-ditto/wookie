@@ -60,6 +60,21 @@ export WOOKIE_SESSION="$(wookie session start --agent codex --id-only)"
 wookie notifications
 ```
 
+For non-trivial implementation work, ask for the plan contract before writing
+the plan, then use the host's native planning mode when available:
+
+```sh
+wookie plan guide --query "change retry exhaustion handling"
+# Use the host's native plan mode to author and save plan.toml.
+wookie plan check plan.toml
+wookie plan attach plan.toml
+wookie plan
+```
+
+Keep the read-only board open while agents record real transitions with
+`wookie plan update` and important context with `wookie plan log`. See
+[Live plans](plans.md) for the schema and archive workflow.
+
 After a meaningful change, decision, blocker, or handoff:
 
 ```sh
@@ -71,12 +86,14 @@ printf '%s\n' "Retry callers now handle the terminal state." | \
     --paths src/retry.rs,tests/retry.rs
 ```
 
-Before stopping, run `wookie doctor` if you changed wiki content, publish a
-handoff notice when unfinished context matters, and close the session.
+Before stopping, run `wookie doctor` if you changed wiki content and publish a
+handoff notice when unfinished context matters. Archive an attached plan to
+close its session; otherwise close the session directly.
 
 ## Next steps
 
 - Learn the bounded retrieval contract in [Retrieving knowledge](retrieval.md).
+- Track a non-trivial implementation with [Live plans](plans.md).
 - Configure retention, budgets, and behavior in [Configuration](configuration.md).
 - Preview coordinated changes with [Transactional publishing](publishing.md).
 - Understand the on-disk safety model in

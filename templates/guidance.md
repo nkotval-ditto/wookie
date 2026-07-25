@@ -15,6 +15,12 @@ main checkout's wiki). Nothing lives inside the repo itself.
   session and retain its id in `WOOKIE_SESSION`. Poll at task start, before
   overlapping edits, and before committing or handing off. If no wiki exists
   or `sessions.enabled` is false, continue without a session.
+- Before writing a non-trivial implementation plan in an active session, run
+  `wookie plan guide --query "$TASK"`, then use the host's native planning
+  mode when it is available (for example, Codex Plan mode or Claude's planning
+  workflow) to author and review the resulting TOML contract. Check and attach
+  that artifact, then record meaningful transitions and decisions as work
+  proceeds. Wookie tracks execution; it does not replace the host planner.
 - Answering questions about the project: `wookie read <id> --expand` first.
   `--expand` inlines a bounded set of linked summaries (depth at most 5, up to
   100 pages), so one command usually gives enough context and reports omissions.
@@ -33,6 +39,13 @@ wookie notifications           # compact unread notices for WOOKIE_SESSION
 wookie notification read N     # read relevant notice + mark read
 wookie notification dismiss N  # dismiss irrelevant notice
 wookie session heartbeat       # keep a long-running session visibly active
+wookie plan guide --query "..." # contract for a guide-linked implementation plan
+wookie plan check plan.toml     # validate plan TOML without changing the session
+wookie plan attach plan.toml    # immutably attach it to WOOKIE_SESSION
+wookie plan                     # open the read-only live localhost board
+wookie plan update SEG STATUS   # append a meaningful segment transition
+wookie plan log --summary "..." # append a progress/decision/blocker/note
+wookie plan archive             # finish the plan and close the session
 wookie notify --summary "..."  # tell other sessions what changed
 wookie read <id> [--expand]    # read a page; --expand inlines linked summaries
 wookie search <query>          # ranked, bounded results; --all is exhaustive
@@ -193,6 +206,16 @@ immediately, before editing files another session may touch, after a substantial
 tool-heavy phase, and before committing or handing off. Use `wookie session
 heartbeat` during long work that otherwise has no wookie activity.
 
+For non-trivial implementation work, run `wookie plan guide --query "$TASK"`
+before authoring, then feed that contract into the host's native plan mode when
+one is available. In Codex, the operator can enter Plan mode with `/plan` or
+Shift+Tab; use Claude's native planning workflow on Claude surfaces. Every
+segment links an existing guide and states its why, decisions, verification,
+and dependencies. Check, then attach the immutable definition. Record only
+real `todo`/`doing`/`blocked`/`done` transitions and meaningful logs. The board
+shows those Wookie records, not private reasoning or unlogged tool activity.
+Archive when complete to retain the record and close the session.
+
 Notification listings intentionally contain only compact metadata. Judge
 relevance from the summary, kind, importance, and affected paths. Read relevant
 items with `wookie notification read`; dismiss irrelevant ones so they do not
@@ -203,7 +226,8 @@ Use `--to <session>` when only specific sessions need it and a stable
 when they help another agent act.
 
 Before stopping, send a `--kind handoff` notice when unfinished context matters,
-then close with `wookie session close`. After upgrading wookie, run `wookie
-plugin status --strict` and reinstall any target it reports stale or missing.
-Notifications cannot interrupt a running agent by themselves; the skill's
-checkpoint polling is the delivery mechanism.
+then archive an attached plan or close an unplanned session with `wookie
+session close`. After upgrading wookie, run `wookie plugin status --strict` and
+reinstall any target it reports stale or missing. Notifications cannot
+interrupt a running agent by themselves; the skill's checkpoint polling is the
+delivery mechanism.

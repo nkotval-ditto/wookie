@@ -54,6 +54,8 @@ live wiki content. See [Build and self-host these docs](self-hosting.md).
 
 - [Session lifecycle](sessions.md) — start, inspect, heartbeat, and close
   agent sessions.
+- [Live plans](plans.md) — author a checked plan, watch its read-only Kanban
+  projection, record progress, and retain the completed session.
 - [Publishing notifications](notifications.md) — report meaningful changes,
   decisions, blockers, warnings, and handoffs.
 - [Inbox triage](inbox-triage.md) — filter compact metadata, read relevant

@@ -17,6 +17,7 @@
 # Agent coordination
 
 - [Session lifecycle](sessions.md)
+- [Live plans](plans.md)
 - [Publishing notifications](notifications.md)
 - [Inbox triage](inbox-triage.md)
 - [Session maintenance](session-maintenance.md)

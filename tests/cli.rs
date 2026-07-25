@@ -2003,7 +2003,6 @@ fn activity_events_are_applied_in_timestamp_order_across_offsets() {
             "id = \"activity-20000101-000000-00000001\"\n",
             "at = \"2026-01-01T01:00:00+02:00\"\n",
             "action = \"earlier instant\"\n",
-            "status = \"active\"\n",
         ),
     )
     .unwrap();
@@ -2012,7 +2011,7 @@ fn activity_events_are_applied_in_timestamp_order_across_offsets() {
         concat!(
             "id = \"activity-20000101-000000-00000002\"\n",
             "at = \"2026-01-01T00:30:00Z\"\n",
-            "action = \"later instant\"\n",
+            "action = \"close\"\n",
             "status = \"closed\"\n",
         ),
     )

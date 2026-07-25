@@ -33,11 +33,20 @@ export WOOKIE_SESSION="$(wookie session start --agent codex --id-only)"
 wookie notifications
 
 # Perform work, polling at coordination checkpoints.
+wookie plan guide --query "change retry exhaustion handling"
+# Use the host's native plan mode to author and save plan.toml.
+wookie plan check plan.toml
+wookie plan attach plan.toml
+wookie plan update implementation doing --note "Focused tests running"
+wookie plan log --segment implementation --kind decision \
+  --summary "Preserved the caller-facing error contract"
+
 wookie notify --summary "Changed retry exhaustion behavior" \
   --kind code-change --paths src/retry.rs,tests/retry.rs
 
 wookie notifications
-wookie session close
+wookie plan update implementation done --note "Focused and full tests passed"
+wookie plan archive --summary "Retry change implemented and verified"
 ```
 
 `WOOKIE_SESSION` removes repetitive flags for CLI session operations. It is
@@ -49,6 +58,15 @@ project wiki exists and returns its bounded, task-relevant map. Poll before
 overlapping edits and before commit, push, handoff, and close. Publish
 meaningful changes rather than every small edit. Use exhaustive `wookie
 context` only when you deliberately need the full catalog.
+
+Before a non-trivial implementation plan, `plan guide` supplies its strict
+guide-linked authoring contract. Use the host's native planning mode when it is
+available to author and review that artifact; Wookie remains the execution
+record rather than a competing planner. The checked definition becomes
+immutable after `plan attach`; agents append transitions and logs while a
+local read-only `wookie plan` board projects the session. It reports only
+explicit Wookie records, not private model reasoning or arbitrary tool
+activity. See [Live plans](plans.md) for the schema and archive workflow.
 
 ## MCP coordination tools
 
@@ -63,6 +81,13 @@ tools mirror the CLI:
 | `session_heartbeat` | `wookie session heartbeat` |
 | `session_close` | `wookie session close` |
 | `session_prune` | `wookie session prune` |
+| `plan_guide` | `wookie plan guide` |
+| `plan_check` | `wookie plan check` |
+| `plan_attach` | `wookie plan attach` |
+| `plan_snapshot` | `wookie plan show` |
+| `plan_update` | `wookie plan update` |
+| `plan_log` | `wookie plan log` |
+| `plan_archive` | `wookie plan archive` |
 | `notify` | `wookie notify` |
 | `notifications` | `wookie notifications` |
 | `notification_read` | `wookie notification read` |
@@ -71,6 +96,11 @@ tools mirror the CLI:
 Every coordination tool accepts optional `wiki` and `cwd` resolution fields.
 Session-scoped MCP calls take an explicit `session`; they do not read
 `WOOKIE_SESSION` from a client shell.
+
+Plan tools follow the same rule. `plan_check` and `plan_attach` accept the TOML
+definition as data; `plan_update`, `plan_log`, and `plan_archive` append the
+same typed records as their CLI equivalents. Starting the localhost board is
+an operator-facing CLI action rather than an MCP tool.
 
 Example publication:
 

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta
+      name="description"
+      content="A live, read-only view of the active Wookie plan and session."
+    >
+    <title>Wookie Plan</title>
+    <link rel="stylesheet" href="/plan.css">
+    <script src="/plan.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#plan-board">Skip to plan board</a>
+
+    <header class="console-header">
+      <div class="brand-lockup" aria-label="Wookie Plan">
+        <span class="brand-node" aria-hidden="true"></span>
+        <span class="brand-name">Wookie</span>
+        <span class="brand-mode">Plan</span>
+      </div>
+
+      <div class="session-strip">
+        <div class="session-copy">
+          <p id="session-kicker" class="session-kicker">Active session</p>
+          <h1 id="session-title">Loading plan…</h1>
+        </div>
+
+        <dl class="session-facts" aria-label="Session status">
+          <div>
+            <dt>Agent</dt>
+            <dd id="session-agent">—</dd>
+          </div>
+          <div>
+            <dt>Session</dt>
+            <dd id="session-id">—</dd>
+          </div>
+          <div>
+            <dt>Progress</dt>
+            <dd id="session-progress">—</dd>
+          </div>
+        </dl>
+
+        <div
+          id="connection-status"
+          class="connection-state is-connecting"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="connection-light" aria-hidden="true"></span>
+          <span id="connection-label">Connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <div id="state-banner" class="state-banner" role="alert" hidden>
+      <strong id="state-banner-title">Unable to load this plan.</strong>
+      <span id="state-banner-detail">
+        Wookie will retry while this page remains open.
+      </span>
+    </div>
+
+    <main class="workspace">
+      <section
+        id="plan-board"
+        class="board-panel"
+        aria-labelledby="plan-heading"
+        aria-describedby="plan-description"
+      >
+        <header class="panel-heading">
+          <div>
+            <p class="eyebrow">Implementation map</p>
+            <h2 id="plan-heading">Plan segments</h2>
+            <p id="plan-description" class="panel-description">
+              Each segment is backed by its implementation guide.
+            </p>
+          </div>
+          <p id="plan-count" class="record-count" aria-live="polite">0 segments</p>
+        </header>
+
+        <div id="board-empty" class="empty-state" hidden>
+          <span class="empty-node" aria-hidden="true"></span>
+          <h3>No plan segments yet</h3>
+          <p>
+            Attach a checked plan to this session. This board will update
+            automatically.
+          </p>
+        </div>
+
+        <div id="board-columns" class="board-columns">
+          <section class="board-column" data-status="todo" aria-labelledby="todo-title">
+            <header class="column-heading">
+              <div>
+                <span class="column-node" aria-hidden="true"></span>
+                <h3 id="todo-title">To do</h3>
+              </div>
+              <span id="todo-count" class="column-count" aria-label="0 items">0</span>
+            </header>
+            <div
+              id="todo-list"
+              class="card-list"
+              role="list"
+              aria-label="Segments to do"
+            ></div>
+          </section>
+
+          <section class="board-column" data-status="doing" aria-labelledby="doing-title">
+            <header class="column-heading">
+              <div>
+                <span class="column-node" aria-hidden="true"></span>
+                <h3 id="doing-title">Doing</h3>
+              </div>
+              <span id="doing-count" class="column-count" aria-label="0 items">0</span>
+            </header>
+            <div
+              id="doing-list"
+              class="card-list"
+              role="list"
+              aria-label="Segments in progress"
+            ></div>
+          </section>
+
+          <section
+            class="board-column"
+            data-status="blocked"
+            aria-labelledby="blocked-title"
+          >
+            <header class="column-heading">
+              <div>
+                <span class="column-node" aria-hidden="true"></span>
+                <h3 id="blocked-title">Blocked</h3>
+              </div>
+              <span id="blocked-count" class="column-count" aria-label="0 items">0</span>
+            </header>
+            <div
+              id="blocked-list"
+              class="card-list"
+              role="list"
+              aria-label="Blocked segments"
+            ></div>
+          </section>
+
+          <section class="board-column" data-status="done" aria-labelledby="done-title">
+            <header class="column-heading">
+              <div>
+                <span class="column-node" aria-hidden="true"></span>
+                <h3 id="done-title">Done</h3>
+              </div>
+              <span id="done-count" class="column-count" aria-label="0 items">0</span>
+            </header>
+            <div
+              id="done-list"
+              class="card-list"
+              role="list"
+              aria-label="Completed segments"
+            ></div>
+          </section>
+        </div>
+      </section>
+
+      <aside class="timeline-panel" aria-labelledby="timeline-heading">
+        <header class="panel-heading timeline-heading">
+          <div>
+            <p class="eyebrow">Session record</p>
+            <h2 id="timeline-heading">Live log</h2>
+          </div>
+          <p id="timeline-count" class="record-count">0 records</p>
+        </header>
+
+        <ol id="timeline-list" class="timeline-list" aria-live="polite"></ol>
+
+        <div id="timeline-empty" class="timeline-empty">
+          <span aria-hidden="true">∟</span>
+          <p>Activity, decisions, blockers, and notifications will appear here.</p>
+        </div>
+
+        <p id="timeline-omitted" class="omitted-note" hidden></p>
+
+        <div
+          id="notification-scan-warning"
+          class="scan-warning"
+          role="status"
+          hidden
+        >
+          <strong id="notification-scan-title">Notification scan incomplete</strong>
+          <p id="notification-scan-detail"></p>
+          <ul id="notification-warning-list"></ul>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="console-footer">
+      <p>Read-only session view</p>
+      <p id="last-updated">Waiting for the first snapshot</p>
+    </footer>
+
+    <dialog id="segment-dialog" class="segment-dialog" aria-labelledby="drawer-title">
+      <div class="drawer-shell">
+        <header class="drawer-header">
+          <div>
+            <p id="drawer-status" class="eyebrow">Plan segment</p>
+            <h2 id="drawer-title">Segment details</h2>
+          </div>
+          <button id="drawer-close" class="icon-button" type="button">
+            <span aria-hidden="true">×</span>
+            <span class="visually-hidden">Close segment details</span>
+          </button>
+        </header>
+
+        <div class="drawer-body">
+          <section aria-labelledby="drawer-why-heading">
+            <h3 id="drawer-why-heading">Why this segment exists</h3>
+            <p id="drawer-justification">No justification recorded.</p>
+          </section>
+
+          <section aria-labelledby="drawer-dependencies-heading">
+            <h3 id="drawer-dependencies-heading">Dependencies</h3>
+            <div id="drawer-readiness" class="readiness-line"></div>
+            <ul id="drawer-dependencies" class="detail-list"></ul>
+          </section>
+
+          <section aria-labelledby="drawer-decisions-heading">
+            <h3 id="drawer-decisions-heading">Architectural decisions</h3>
+            <ul id="drawer-decisions" class="detail-list"></ul>
+          </section>
+
+          <section aria-labelledby="drawer-verification-heading">
+            <h3 id="drawer-verification-heading">Verification</h3>
+            <p id="drawer-verification">No verification criteria recorded.</p>
+          </section>
+
+          <section class="guide-section" aria-labelledby="drawer-guide-heading">
+            <div class="guide-heading-row">
+              <div>
+                <h3 id="drawer-guide-heading">Implementation guide</h3>
+                <p id="drawer-guide-id" class="guide-id">No guide attached</p>
+              </div>
+              <button id="guide-reload" class="text-button" type="button">
+                Reload guide
+              </button>
+            </div>
+            <div id="guide-state" class="guide-state" role="status" aria-live="polite">
+              Select a segment to load its guide.
+            </div>
+            <article id="guide-page" class="guide-page" hidden>
+              <h4 id="guide-title"></h4>
+              <p id="guide-description" class="guide-description"></p>
+              <ul id="guide-tags" class="tag-list" aria-label="Guide tags"></ul>
+              <pre id="guide-body" class="guide-body"></pre>
+            </article>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <div id="screen-reader-updates" class="visually-hidden" aria-live="polite"></div>
+  </body>
+</html>

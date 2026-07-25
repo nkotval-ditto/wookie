@@ -19,6 +19,8 @@ $WOOKIE_HOME/
     sessions/
       <session-id>/
         session.toml
+        plan.toml             # optional immutable attached plan
+        archive.md            # optional immutable derived final record
         activity/
           <activity-id>.toml
         notifications/
@@ -29,10 +31,19 @@ $WOOKIE_HOME/
         inbox.toml            # optional legacy read state
 ```
 
-`session.toml` is the immutable starting record. Later heartbeats and status
-changes are append-only activity files; wookie derives `updated_at`,
-`last_seen_at`, and status when loading the session. Notification Markdown has
-TOML frontmatter followed by its full body.
+`session.toml` is the immutable starting record. An optional `plan.toml` is
+also immutable after exclusive attachment. Later heartbeats, plan transitions,
+plan logs, archive receipts, and status changes are append-only activity files;
+Wookie derives current plan/session state, `updated_at`, `last_seen_at`, and
+status when loading. `archive.md` is a deterministic immutable projection
+written at archive time; the typed archive activity remains authoritative.
+Notification Markdown has TOML frontmatter followed by its full body.
+
+New activity records receive a monotonic per-session sequence while the shared
+mutation guard is held. That sequence—not wall-clock coincidence—defines the
+fold order for transitions and archive closure. Legacy records without a
+sequence remain readable and sort before sequenced records by timestamp and
+id; duplicate or zero sequences fail closed.
 
 Inbox acknowledgement files are receiver-local state. They and legacy
 `inbox.toml` files are gitignored, so acknowledgement markers themselves do not
@@ -60,11 +71,12 @@ sessions/**/.*.tmp-*
 
 ## Concurrent session operations
 
-Publishing a notification, recording activity, and acknowledging a notice
-each atomically publishes a complete new file without replacement. No two readers rewrite a
-shared inbox map, so concurrent read/dismiss operations cannot lose one
-another's acknowledgement. Notification and activity ids include time and
-process entropy; idempotent notices use a stable, source-scoped id.
+Attaching a plan, publishing a notification, recording activity, and
+acknowledging a notice each atomically publishes a complete new file without
+replacement. No two readers rewrite a shared board or inbox map, so concurrent
+plan updates and read/dismiss operations cannot lose one another's history.
+Notification and activity ids include time and process entropy; idempotent
+notices use a stable, source-scoped id.
 
 Legacy `inbox.toml` state remains readable. New acknowledgements always use
 the append-only marker layout.

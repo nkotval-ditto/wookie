@@ -3,13 +3,15 @@
 //! into `commands`. Hand-rolled on purpose — the protocol surface we need is
 //! four methods, not worth an async runtime.
 
-use crate::{commands, config, publish, retrieval, sessions, settings, wiki};
+use crate::{commands, config, plan, publish, retrieval, sessions, settings, wiki};
 use anyhow::{anyhow, bail, Result};
+use clap::ValueEnum;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
 
 const MAX_MCP_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PLAN_INPUT_BYTES: usize = plan::MAX_PLAN_BYTES;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const STRUCTURED_RESULT_TEXT: &str = "Structured result available in structuredContent.";
 const PUBLISH_RECOVERY_STATUS_SCHEMA: &str = "wookie.publish-recovery-status/v1";
@@ -182,6 +184,15 @@ fn notification_kind(value: Option<&str>, fallback: &str) -> Result<sessions::No
     })
 }
 
+fn plan_status(value: &str) -> Result<plan::PlanStatus> {
+    plan::PlanStatus::from_str(value, false).map_err(|_| anyhow!("invalid plan status '{value}'"))
+}
+
+fn plan_log_kind(value: &str) -> Result<plan::PlanLogKind> {
+    plan::PlanLogKind::from_str(value, false)
+        .map_err(|_| anyhow!("invalid plan log kind '{value}'"))
+}
+
 fn importance(value: Option<&str>, fallback: &str) -> Result<sessions::Importance> {
     Ok(match value.unwrap_or(fallback) {
         "low" => sessions::Importance::Low,
@@ -300,6 +311,91 @@ fn tool_defs() -> Vec<Value> {
                 "since": { "type": "string", "description": "Prior state_hash; matching state omits unchanged section structure." },
                 "context_hash": { "type": "string", "description": "Exact query/options/state hash required for a nonzero cursor." },
                 "cursor": { "type": "integer", "minimum": 0 },
+            }))),
+        }),
+        json!({
+            "name": "plan_guide",
+            "description": "Prepare the host agent's native plan mode with Wookie's concise artifact contract. Use this before creating a non-trivial session plan.",
+            "inputSchema": schema(&[], wiki_props(json!({
+                "query": {
+                    "type": "string",
+                    "maxLength": retrieval::MAX_QUERY_BYTES,
+                    "description": "Optional task statement to place above the reusable guidance."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_check",
+            "description": "Validate a complete wookie.plan/v1 TOML definition, including segment dependencies and guide-page references, without changing the session.",
+            "inputSchema": schema(&["definition"], wiki_props(json!({
+                "definition": {
+                    "type": "string",
+                    "maxLength": MAX_PLAN_INPUT_BYTES,
+                    "description": "Complete wookie.plan/v1 TOML document."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_attach",
+            "description": "Attach one validated, immutable plan definition to an existing Wookie session.",
+            "inputSchema": schema(&["session", "definition"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "definition": {
+                    "type": "string",
+                    "maxLength": MAX_PLAN_INPUT_BYTES,
+                    "description": "Complete wookie.plan/v1 TOML document."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_update",
+            "description": "Append a status transition for one attached-plan segment and return the newly folded snapshot.",
+            "inputSchema": schema(&["session", "segment", "status"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "segment": { "type": "string", "maxLength": plan::MAX_SEGMENT_ID_BYTES },
+                "status": { "type": "string", "enum": ["todo", "doing", "blocked", "done"] },
+                "note": {
+                    "type": "string",
+                    "maxLength": plan::MAX_UPDATE_NOTE_BYTES,
+                    "description": "Concise context for the transition."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_log",
+            "description": "Append a durable progress, decision, blocker, or note event to the session plan.",
+            "inputSchema": schema(&["session", "summary"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "summary": { "type": "string", "maxLength": plan::MAX_LOG_SUMMARY_BYTES },
+                "segment": {
+                    "type": "string",
+                    "maxLength": plan::MAX_SEGMENT_ID_BYTES,
+                    "description": "Optional related segment id."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["progress", "decision", "blocker", "note"],
+                    "description": "Defaults to progress."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_snapshot",
+            "description": "Read the current plan, folded segment states, activity timeline, and session metadata.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+            }))),
+        }),
+        json!({
+            "name": "plan_archive",
+            "description": "Finalize a plan archive receipt and close its session. Incomplete plans are refused unless explicitly allowed.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "summary": { "type": "string", "maxLength": 8192 },
+                "allow_incomplete": {
+                    "type": "boolean",
+                    "description": "Explicitly permit archival while segments remain todo, doing, or blocked."
+                },
             }))),
         }),
         json!({
@@ -829,6 +925,81 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
             },
             true,
         ),
+        "plan_guide" => {
+            let guide = plan::guide_text();
+            let query = str_arg("query")
+                .filter(|query| !query.trim().is_empty())
+                .map(|query| plan::clean_task_query(&query))
+                .transpose()?;
+            query
+                .as_deref()
+                .map(retrieval::validate_query)
+                .transpose()?;
+            Ok(json!({
+                "schema": "wookie.plan-guide/v1",
+                "query": query,
+                "guide": guide,
+            })
+            .to_string())
+        }
+        "plan_check" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::check(
+                &w,
+                &require("definition")?,
+            )?)?)
+        }
+        "plan_attach" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::attach(
+                &w,
+                &require("session")?,
+                &require("definition")?,
+            )?)?)
+        }
+        "plan_update" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::update(
+                &w,
+                &require("session")?,
+                &require("segment")?,
+                plan_status(&require("status")?)?,
+                str_arg("note").as_deref(),
+            )?)?)
+        }
+        "plan_log" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::log(
+                &w,
+                &require("session")?,
+                str_arg("segment").as_deref(),
+                plan_log_kind(str_arg("kind").as_deref().unwrap_or("progress"))?,
+                &require("summary")?,
+            )?)?)
+        }
+        "plan_snapshot" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::snapshot(
+                &w,
+                &require("session")?,
+                plan::SnapshotOptions::default(),
+            )?)?)
+        }
+        "plan_archive" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::archive(
+                &w,
+                &require("session")?,
+                bool_arg(args, "allow_incomplete", false)?,
+                str_arg("summary").as_deref(),
+            )?)?)
+        }
         "session_start" => {
             let w = resolve()?;
             coordination_enabled(&w)?;
@@ -1392,6 +1563,55 @@ mod tests {
         assert!(validate_tool_args(
             "publish_recovery_status",
             &json!({"force_stale_lock": false})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn plan_tool_schemas_are_strict_and_bounded() {
+        validate_tool_args(
+            "plan_update",
+            &json!({
+                "session": "session-20260725-example",
+                "segment": "implementation",
+                "status": "done",
+                "note": "Verified with cargo test."
+            }),
+        )
+        .unwrap();
+        validate_tool_args(
+            "plan_log",
+            &json!({
+                "session": "session-20260725-example",
+                "segment": "implementation",
+                "kind": "decision",
+                "summary": "Updated the command surface."
+            }),
+        )
+        .unwrap();
+        assert!(validate_tool_args(
+            "plan_update",
+            &json!({
+                "session": "session-20260725-example",
+                "segment": "implementation",
+                "status": "complete"
+            })
+        )
+        .is_err());
+        assert!(validate_tool_args(
+            "plan_attach",
+            &json!({
+                "session": "session-20260725-example",
+                "definition": "x".repeat(MAX_PLAN_INPUT_BYTES + 1)
+            })
+        )
+        .is_err());
+        assert!(validate_tool_args(
+            "plan_archive",
+            &json!({
+                "session": "session-20260725-example",
+                "unexpected": true
+            })
         )
         .is_err());
     }

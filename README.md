@@ -35,6 +35,22 @@ export WOOKIE_SESSION="$(wookie session start --agent codex --id-only)"
 wookie notifications
 ```
 
+For a non-trivial implementation, create a checked, guide-linked plan and open
+its live board:
+
+```sh
+wookie plan guide --query "redesign retry exhaustion handling"
+# Use the host's native plan mode to author and save plan.toml.
+wookie plan check plan.toml
+wookie plan attach plan.toml
+wookie plan
+```
+
+Agents move segments through the fixed `todo`, `doing`, `blocked`, and `done`
+states with `wookie plan update`, record meaningful context with `wookie plan
+log`, then use `wookie plan archive` to preserve the completed record and close
+the session.
+
 After meaningful work, publish enough metadata for another agent to judge its
 relevance without opening the full notice:
 
@@ -81,6 +97,8 @@ complete `git add` plus `git commit` transaction across concurrent processes.
     sessions/
       session-20260721-143052-7f3a/
         session.toml                immutable base session record
+        plan.toml                   immutable attached plan, when present
+        archive.md                  immutable derived final plan record
         activity/                   append-only status/heartbeat events
           activity-....toml
         notifications/              append-only Markdown notices
@@ -218,6 +236,38 @@ inside the transaction without opening a section-wide unlock window.
 `wookie status` is the compact operator dashboard. `doctor`, `critique`,
 `expand`, and `ingest` expose stable `wookie.report/v1` JSON for CI; provenance
 checks can validate page sources against an explicit project revision.
+
+## Live implementation plans
+
+`wookie plan` is a deliberately small planning layer over existing pages and
+sessions. `wookie plan guide --query "$TASK"` gives an agent the strict
+`wookie.plan/v1` TOML contract before a non-trivial plan is written. The agent
+uses its host's native planning mode when available—Codex Plan mode, Claude's
+planning workflow, or the equivalent—to author and review that artifact;
+Wookie does not replace the host planner. Every segment carries a
+justification, architectural decisions, verification, dependencies, and an
+existing non-stub Wookie guide page. `plan check` validates the definition
+without changing the wiki; `plan attach` stores it immutably in the active
+session. Retrying the identical canonical attachment is idempotent; attaching
+a different replacement is rejected.
+
+The bare `wookie plan` command serves a short-lived read-only board on
+`127.0.0.1`, using an ephemeral port by default. Version 1 has no LAN/public
+bind option. It shows the fixed `todo`, `doing`, `blocked`, and `done` columns,
+animates recorded transitions, and exposes card detail plus the session
+timeline. There is no drag-and-drop write path: agents use `plan update` and
+`plan log`, which append typed activity events. The board can show only
+Wookie-recorded activity, not private model reasoning or arbitrary shell/editor
+actions.
+
+`wookie plan archive` requires every segment to be done unless
+`--allow-incomplete` is explicit. The final typed event records counts and
+receipt hashes and closes the session; a deterministic immutable `archive.md`
+makes the final record easy to read. The attached plan, archive, and activity
+remain under normal session retention until an applied prune removes the
+session. Their Git retention depends on wiki auto-commit and
+`history.commit_sessions`. See [Live plans](docs/plans.md) for the schema,
+complete workflow, JSON/MCP usage, and local-server security model.
 
 ## Cross-session coordination
 
@@ -366,6 +416,9 @@ wookie unlock / lock                  approved rules-section write window
 wookie session start|list|show        session lifecycle and discovery
 wookie session heartbeat|close        append activity/status events
 wookie session prune                  preview or apply retention cleanup
+wookie plan guide|check|attach        author and attach a validated plan
+wookie plan [--port N|--no-open]      open the read-only localhost board
+wookie plan show|update|log|archive   inspect, progress, and finish a plan
 wookie notify                         publish a notification
 wookie notifications                  poll and filter compact metadata
 wookie notification read|dismiss      acknowledge one notification
@@ -384,9 +437,11 @@ for every flag and filter.
 ## MCP
 
 `wookie serve` implements newline-delimited JSON-RPC 2.0 over stdio. Its tools
-mirror page, wiki, session, notification, critique, doctor, ingest, lock, and
-configuration operations. Tools that resolve a wiki accept optional `wiki`
-and `cwd` fields.
+mirror page, wiki, plan, session, notification, critique, doctor, ingest, lock,
+and configuration operations. Tools that resolve a wiki accept optional
+`wiki` and `cwd` fields. Plan agents use `plan_guide`, `plan_check`,
+`plan_attach`, `plan_snapshot`, `plan_update`, `plan_log`, and `plan_archive`;
+the interactive browser launcher remains a local CLI operation.
 
 ```sh
 claude mcp add wookie -- wookie serve
@@ -414,6 +469,7 @@ current. Re-run `plugin install` after upgrading Wookie.
 ## Guides
 
 - [Guide index](docs/README.md)
+- [Live plans](docs/plans.md)
 - [Session lifecycle](docs/sessions.md)
 - [Publishing notifications](docs/notifications.md)
 - [Inbox polling and triage](docs/inbox-triage.md)

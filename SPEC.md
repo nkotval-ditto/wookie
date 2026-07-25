@@ -13,6 +13,8 @@ Wookie provides:
 - configurable information and rules sections, protected normative content,
   bounded task-aware retrieval, ingest worklists, and critique briefings;
 - inert project-scoped page protocols and journaled transactional publishing;
+- immutable guide-linked implementation plans with append-only progress events
+  and a read-only loopback board;
 - durable agent sessions and append-only notifications with receiver-local
   acknowledgement state;
 - safe concurrent local mutation and serialized Git history;
@@ -44,6 +46,8 @@ judgment and prose. Separate clones do not merge automatically by remote URL.
     sessions/
       session-20260721-143052-7f3a/
         session.toml
+        plan.toml                     optional immutable wookie.plan/v1 definition
+        archive.md                    optional immutable derived final record
         activity/
           activity-20260721-143100-....toml
         notifications/
@@ -459,11 +463,15 @@ timestamps, initial lookback, activity debounce, heartbeat preference, and
 
 The base file is never rewritten for normal activity. Heartbeats, close events,
 and automatically observed activity create unique files beneath `activity/`.
-Loading a session sorts valid events by timestamp and id, then derives
-`updated_at`, `last_seen_at`, and status. Missing or malformed legacy activity
-is tolerated. Automatic events are debounced per session; `heartbeat --force`
-and close bypass the debounce. `WOOKIE_SESSION` supplies omitted CLI session
-arguments.
+New events carry a nonzero per-session sequence allocated under the mutation
+guard. Loading validates sequence uniqueness, orders pre-sequence legacy events
+by timestamp/id before sequenced events, derives status from that canonical
+append order, and derives display activity time from the latest valid
+timestamp. Missing or malformed legacy activity is tolerated for ordinary
+session inspection but a plan snapshot fails closed when its activity stream
+is incomplete. Automatic events are debounced per session; `heartbeat
+--force` and close bypass the debounce. `WOOKIE_SESSION` supplies omitted CLI
+session arguments.
 
 Session listing filters status, agent, label text, creation time, and activity
 time, with limit and ordering. CLI `--active` and `--stale` derive their cutoff
@@ -480,6 +488,124 @@ the set. An unbounded request that includes active sessions is rejected.
 Configured retention defaults to 30 days when no cutoff is supplied. Optional
 auto-prune runs on session start only when both `auto_prune_on_start` and a
 retention period are configured.
+
+## Plan model
+
+### Definition and validation
+
+A live plan belongs to exactly one session. The definition is strict TOML:
+
+```toml
+schema = "wookie.plan/v1"
+title = "Implement retry redesign"
+
+[[segments]]
+id = "confirm-boundaries"
+title = "Confirm retry ownership boundaries"
+status = "todo"
+guide = "architecture/retry-policy"
+justification = "Implementation depends on stable ownership boundaries."
+decisions = ["Keep policy separate from mutable execution state."]
+verification = "Review callers and run the architecture checks."
+depends_on = []
+```
+
+The schema accepts only `schema`, `title`, and `segments` at the top level.
+Every segment requires exactly `id`, `title`, `status`, `guide`,
+`justification`, `decisions`, and `verification`; `depends_on` is optional and
+defaults to an empty list. The schema name must be `wookie.plan/v1`; statuses
+are the fixed enum `todo`, `doing`, `blocked`, and `done`. Segment ids are
+unique, safe lowercase identifiers. Every guide resolves to an existing
+non-stub page. Decisions are non-empty, dependencies name other segments, and
+the dependency graph is acyclic.
+Unknown fields, unsafe/control text, duplicate/self/unknown dependencies, and
+exceeded count or byte bounds fail closed. An initial `doing` or `done`
+segment is invalid while any declared dependency is not initially `done`.
+
+A plan is limited to 256 KiB, 128 segments, 64-byte segment ids, 8 KiB
+justification/decision/verification values, narrower title/guide fields, 32
+decisions or dependencies per segment, and 256 KiB aggregate text.
+Plan snapshots include at most 1,000 retained activity entries and 1,000
+retained notification entries. The default board projection requests 200
+activity events and 50 outgoing notifications. These are safety ceilings, not
+configurable workflow policy.
+
+Attachment validation loads each distinct guide once and accepts at most 512
+KiB per serialized guide plus 4 MiB across all distinct guides. This bounds
+validation work while the shared mutation guard is held.
+
+`plan guide --query <task>` emits the authoring contract and asks the caller to
+use its host's native planning mode, when available, to build and review a
+small dependency-aware plan grounded in relevant Wookie pages. Wookie owns the
+validated execution artifact and event log, not a parallel planning engine.
+`plan check [FILE]` parses and validates without mutation, reading stdin when
+the file is omitted. `plan attach [FILE]` revalidates under the shared mutation
+guard and exclusively creates `sessions/<session-id>/plan.toml`. A retry with
+the identical canonical plan hash is idempotent; a different replacement is
+rejected. An attached definition is immutable; there is no edit or replace
+operation.
+
+### Events, snapshots, and archive
+
+Plan state changes are optional typed payloads on the existing immutable
+session activity records. A transition names a segment, its prior and new
+status, and an optional note. A log has kind `progress`, `decision`, `blocker`,
+or `note`, an optional segment, and a summary. Events are not debounced. The
+snapshot deterministically folds the definition and ordered append-only events
+to produce current cards, counts, session metadata, notifications, and
+timeline. It contains no read-time clock value, so identical source records
+serialize identically and can use a content ETag.
+
+Updates require an active session and an attached plan. A segment may otherwise
+move between the four states, but cannot move into `doing` or `done` until all
+declared dependencies are done. The agent is responsible for moving a segment
+to `done` only after its declared verification succeeds. Wookie records
+explicit events, not private model reasoning or arbitrary shell/editor
+activity.
+
+Guide existence and non-stub status are attachment-time invariants. If a guide
+is later removed, renamed, or turned into a stub, snapshot folding still
+succeeds so the board can report the live guide error without making the
+historical plan unreadable.
+
+`plan archive` refuses any current segment outside `done` unless
+`allow_incomplete` is true. It appends one typed archive event containing the
+plan hash, archive-receipt hash, total/done/incomplete counts, and optional
+summary; that same event derives the session's closed status and is the
+authoritative receipt. It also writes a deterministic immutable `archive.md`
+view of the final plan, activity timeline, and bounded outgoing-notification
+summaries with an omission count. There is no mutable board file. `plan.toml`,
+`archive.md`, and the activity stream follow normal session retention. A retry
+of a closed archived session recomputes and verifies the receipt, then creates
+or exact-compares the derived Markdown; this repairs an interruption after the
+authoritative event without accepting a conflicting archive.
+
+### Local board
+
+The bare `wookie plan` command serves an embedded, read-only board. It binds
+only to `127.0.0.1`; port zero asks the operating system for an ephemeral port,
+while `--port` selects an explicit local port and `--no-open` suppresses
+launching the default browser. Version 1 has no configuration or flag for a
+LAN/public bind. The viewer exists only for the foreground process and needs no
+daemon or file watcher: the client polls a snapshot endpoint and uses ETags to
+avoid unchanged payloads.
+
+The board has fixed `todo`, `doing`, `blocked`, and `done` columns. A card links
+to its validated guide and exposes the justification, decisions, verification,
+and dependencies. New transitions animate between columns unless reduced
+motion is requested; the timeline shows Wookie-recorded activity and
+notifications.
+
+The HTTP surface accepts only read methods and has no mutation or drag-and-drop
+endpoint. It validates local Host and Origin information, sends no-store,
+nosniff, frame-denial, referrer, permissions, and restrictive content-security
+headers, embeds its static assets, and renders page/plan strings as text rather
+than trusted HTML. Loopback is an observation boundary, not an authorization
+mechanism: the server has no login or capability token, so any local process
+that learns the port and supplies the expected `Host` value can read its plan
+and guide projections while it is running. The minimal foreground viewer does
+not promise resistance to hostile local slow-client/header resource
+exhaustion; it is not a multi-user service and should be stopped after use.
 
 ## Notification model
 
@@ -643,8 +769,8 @@ markers are always ignored.
 
 The CLI exposes wiki lifecycle, page CRUD and graph operations, bounded
 retrieval, protocols, ingest, critique, audit/status, transactional publish,
-rules proposals, locks, Obsidian, plugin, configuration, session, notification,
-and MCP server commands. `--wiki` and `--json` are global.
+rules proposals, locks, Obsidian, plugin, configuration, session, plan,
+notification, and MCP server commands. `--wiki` and `--json` are global.
 Read-style and mutation results have JSON variants; errors explain the next
 valid action where possible.
 
@@ -652,13 +778,26 @@ valid action where possible.
 prune defaults dry-run. Section configuration and unlock operations keep their
 explicit user-approval barriers.
 
+`plan guide`, `check`, `attach`, `show`, `update`, `log`, and `archive` have
+typed JSON projections. Session-scoped plan commands accept an explicit
+session or the CLI `WOOKIE_SESSION`; the bare board command is intentionally a
+human CLI surface. Definitions, snapshots, activity payloads, and archive
+receipts identify themselves as `wookie.plan/v1`, `wookie.plan-snapshot/v1`,
+`wookie.plan-event/v1`, and `wookie.plan-archive/v1`, respectively.
+
 ## MCP protocol and results
 
 `wookie serve` implements newline-delimited JSON-RPC 2.0 over stdio with
 `initialize`, `ping`, `tools/list`, and `tools/call`. Tools mirror the CLI's
 wiki, page, prime/search, protocol, publish, ingest, critique, section-lock,
-doctor/status, configuration, session, and notification surfaces. `wiki` and
-`cwd` fields select the resolution context.
+doctor/status, configuration, session, plan, and notification surfaces.
+`wiki` and `cwd` fields select the resolution context.
+
+Plan tools are `plan_guide`, `plan_check`, `plan_attach`, `plan_snapshot`,
+`plan_update`, `plan_log`, and `plan_archive`. They call the same validation,
+mutation-guard, event-folding, and archive layers as the CLI and require an
+explicit `session` where applicable. The MCP server does not launch the local
+browser board.
 
 The command layer is called with JSON output. On success an object result is
 carried once in `structuredContent`; the text block is deliberately compact:

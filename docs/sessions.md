@@ -40,6 +40,14 @@ explicit session argument is omitted. An explicit `--session` or positional id
 takes precedence. MCP calls do not inherit this shell variable; they take an
 explicit `session` field.
 
+Session-scoped plan commands—board, attach, show, update, log, and
+archive—use the same identity. `plan guide` is host guidance and `plan check`
+only needs the wiki. For non-trivial implementation work, use `wookie plan
+guide --query "$TASK"`, attach the checked definition, and record progress
+before closing. `wookie plan archive` closes the session as part of its final
+append-only archive event; do not also close it first. See [Live
+plans](plans.md).
+
 For structured CLI output:
 
 ```sh
@@ -159,13 +167,24 @@ Each session has its own append-oriented directory:
 ```text
 sessions/<session-id>/
   session.toml
+  plan.toml
+  archive.md
   activity/<activity-id>.toml
   notifications/<notification-id>.md
   inbox/<notification-id>.read
   inbox/<notification-id>.dismissed
 ```
 
-`session.toml`, activity, and published notifications are durable wiki state.
+`plan.toml` is present only when a live plan was attached. It remains
+immutable; plan transitions, logs, and the authoritative final archive receipt
+are typed activity entries rather than rewrites to a board file. `archive.md`
+is an optional immutable deterministic human-readable view produced at archive
+time.
+
+`session.toml`, an attached plan, a derived archive, activity, and published
+notifications are durable wiki state. An applied session prune removes all of
+them for the selected session. They enter durable Git history only when wiki
+auto-commit and `history.commit_sessions` are enabled.
 Inbox markers are local and gitignored, so concurrent reads and dismissals do
 not rewrite a shared file or create history noise. Legacy `inbox.toml` state
 is still honored. Details are in

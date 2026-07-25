@@ -5,6 +5,8 @@ mod git_paths;
 mod history;
 mod mcp;
 mod page;
+mod plan;
+mod plan_server;
 mod plugins;
 mod protocol;
 mod publish;
@@ -23,6 +25,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 const MAX_PAGE_STDIN_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PLAN_INPUT_BYTES: usize = plan::MAX_PLAN_BYTES;
 
 fn parse_read_expand_depth(value: &str) -> std::result::Result<usize, String> {
     let depth = value
@@ -71,6 +74,20 @@ enum Cmd {
     Session {
         #[command(subcommand)]
         cmd: SessionCmd,
+    },
+    /// Create, track, and review a live session plan
+    Plan {
+        /// Session id; defaults to WOOKIE_SESSION
+        #[arg(long, global = true)]
+        session: Option<String>,
+        /// Loopback port for the board (0 asks the OS to choose)
+        #[arg(long, default_value = "0")]
+        port: u16,
+        /// Print the board URL without opening a browser
+        #[arg(long)]
+        no_open: bool,
+        #[command(subcommand)]
+        cmd: Option<PlanCmd>,
     },
     /// Publish a short notification from this agent session
     Notify {
@@ -471,6 +488,54 @@ enum ProtocolCmd {
     Remove { name: String },
 }
 
+#[derive(Subcommand)]
+enum PlanCmd {
+    /// Prepare the host's native plan mode with Wookie's artifact contract
+    Guide {
+        /// Task to ground the generated plan guidance
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// Validate a plan definition without attaching it
+    Check {
+        /// TOML plan file; omit to read stdin
+        file: Option<PathBuf>,
+    },
+    /// Attach an immutable plan definition to this session
+    Attach {
+        /// TOML plan file; omit to read stdin
+        file: Option<PathBuf>,
+    },
+    /// Show the current folded plan snapshot
+    Show,
+    /// Record a plan segment status transition
+    Update {
+        segment: String,
+        #[arg(value_enum)]
+        status: plan::PlanStatus,
+        /// Concise context for the transition
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Add a durable progress, decision, blocker, or note event
+    Log {
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        segment: Option<String>,
+        #[arg(long, value_enum, default_value = "progress")]
+        kind: plan::PlanLogKind,
+    },
+    /// Finalize the plan receipt and close its session
+    Archive {
+        #[arg(long)]
+        summary: Option<String>,
+        /// Archive even when one or more segments are not done
+        #[arg(long)]
+        allow_incomplete: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum PublishRecoveryArg {
     Rollback,
@@ -743,6 +808,14 @@ fn read_input_file_or_stdin(path: Option<&std::path::Path>, max_bytes: usize) ->
     stdin_body(max_bytes)?.ok_or_else(|| anyhow!("missing input: pass a file or pipe it on stdin"))
 }
 
+fn format_serialized<T: serde::Serialize>(value: &T, json: bool) -> Result<String> {
+    if json {
+        Ok(serde_json::to_string(value)?)
+    } else {
+        Ok(serde_json::to_string_pretty(value)?)
+    }
+}
+
 fn session_id(explicit: Option<String>) -> Result<String> {
     explicit
         .or_else(|| std::env::var("WOOKIE_SESSION").ok())
@@ -1004,6 +1077,161 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Cmd::Plan {
+            session,
+            port,
+            no_open,
+            cmd,
+        } => match cmd {
+            None => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                plan_server::serve(
+                    &w,
+                    &session_id(session)?,
+                    plan_server::PlanServerOptions {
+                        port,
+                        open: !no_open,
+                    },
+                )?;
+                String::new()
+            }
+            Some(PlanCmd::Guide { query }) => {
+                let guide = plan::guide_text();
+                let query = query
+                    .filter(|query| !query.trim().is_empty())
+                    .map(|query| plan::clean_task_query(&query))
+                    .transpose()?;
+                query
+                    .as_deref()
+                    .map(retrieval::validate_query)
+                    .transpose()?;
+                if json {
+                    serde_json::json!({
+                        "schema": "wookie.plan-guide/v1",
+                        "query": query,
+                        "guide": guide,
+                    })
+                    .to_string()
+                } else {
+                    match query {
+                        Some(query) => format!("Task: {query}\n\n{guide}"),
+                        None => guide.to_string(),
+                    }
+                }
+            }
+            Some(PlanCmd::Check { file }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let input = read_input_file_or_stdin(file.as_deref(), MAX_PLAN_INPUT_BYTES)?;
+                let checked = plan::check(&w, &input)?;
+                if json {
+                    serde_json::to_string(&checked)?
+                } else {
+                    format!(
+                        "Plan is valid: '{}' ({} segment(s), sha256 {}).",
+                        checked.title, checked.segment_count, checked.plan_hash
+                    )
+                }
+            }
+            Some(PlanCmd::Attach { file }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let input = read_input_file_or_stdin(file.as_deref(), MAX_PLAN_INPUT_BYTES)?;
+                let snapshot = plan::attach(&w, &session_id(session)?, &input)?;
+                if json {
+                    serde_json::to_string(&snapshot)?
+                } else {
+                    format!(
+                        "Attached plan '{}' to session '{}' with {} segment(s). Open it with `wookie plan`.",
+                        snapshot.title,
+                        snapshot.session.id,
+                        snapshot.segments.len()
+                    )
+                }
+            }
+            Some(PlanCmd::Show) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                format_serialized(
+                    &plan::snapshot(&w, &session_id(session)?, plan::SnapshotOptions::default())?,
+                    json,
+                )?
+            }
+            Some(PlanCmd::Update {
+                segment,
+                status,
+                note,
+            }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let snapshot =
+                    plan::update(&w, &session_id(session)?, &segment, status, note.as_deref())?;
+                if json {
+                    serde_json::to_string(&snapshot)?
+                } else {
+                    format!(
+                        "Recorded segment '{}' as {} in session '{}'.",
+                        segment, status, snapshot.session.id
+                    )
+                }
+            }
+            Some(PlanCmd::Log {
+                summary,
+                segment,
+                kind,
+            }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let snapshot = plan::log(
+                    &w,
+                    &session_id(session)?,
+                    segment.as_deref(),
+                    kind,
+                    &summary,
+                )?;
+                if json {
+                    serde_json::to_string(&snapshot)?
+                } else {
+                    format!(
+                        "Recorded {} log for {} in session '{}'.",
+                        kind,
+                        segment
+                            .as_deref()
+                            .map_or_else(|| "the plan".to_string(), |id| format!("segment '{id}'")),
+                        snapshot.session.id
+                    )
+                }
+            }
+            Some(PlanCmd::Archive {
+                summary,
+                allow_incomplete,
+            }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let archived = plan::archive(
+                    &w,
+                    &session_id(session)?,
+                    allow_incomplete,
+                    summary.as_deref(),
+                )?;
+                if json {
+                    serde_json::to_string(&archived)?
+                } else {
+                    format!(
+                        "Archived plan '{}' for session '{}'.\nRecord: {}\nSegments: {}/{} done; activity: {}; notifications: {} ({} omitted).",
+                        archived.receipt.title,
+                        archived.receipt.session_id,
+                        archived.archive_path,
+                        archived.receipt.done_segments,
+                        archived.receipt.total_segments,
+                        archived.receipt.activity_events,
+                        archived.receipt.notifications,
+                        archived.receipt.notifications_omitted
+                    )
+                }
+            }
+        },
         Cmd::Notify {
             session,
             summary,
@@ -1525,6 +1753,49 @@ mod input_tests {
             parse_read_expand_depth(&(commands::MAX_READ_EXPAND_DEPTH + 1).to_string()).is_err()
         );
         assert!(parse_read_expand_depth(&u64::MAX.to_string()).is_err());
+    }
+
+    #[test]
+    fn plan_cli_supports_board_and_lifecycle_commands() {
+        let cli = Cli::try_parse_from([
+            "wookie",
+            "plan",
+            "--session",
+            "session-2026-07-25-example",
+            "--port",
+            "4242",
+            "--no-open",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Plan {
+                cmd: None,
+                port: 4242,
+                no_open: true,
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wookie",
+            "plan",
+            "update",
+            "implementation",
+            "done",
+            "--note",
+            "Tests passed",
+            "--session",
+            "session-2026-07-25-example",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Plan {
+                cmd: Some(PlanCmd::Update { .. }),
+                ..
+            }
+        ));
     }
 
     #[test]

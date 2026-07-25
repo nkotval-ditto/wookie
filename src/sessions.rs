@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024;
-const MAX_ACTIVITY_FILE_BYTES: u64 = 16 * 1024;
+const MAX_ACTIVITY_FILE_BYTES: u64 = 32 * 1024;
 const MAX_LEGACY_INBOX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_GIT_CONTEXT_CAPTURE_BYTES: usize = 32 * 1024 * 1024;
@@ -24,6 +24,7 @@ const MAX_SESSION_SCAN_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ACTIVITY_ENTRIES_PER_SESSION: usize = 10_000;
 const MAX_ACTIVITY_BYTES_PER_SESSION: u64 = 8 * 1024 * 1024;
 const MAX_STORAGE_WARNINGS: usize = 100;
+const PLAN_EVENT_SCHEMA: &str = "wookie.plan-event/v1";
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 100;
 pub const DEFAULT_SESSION_SHOW_LIMIT: usize = 20;
 pub const MAX_SESSION_RESPONSE_LIMIT: usize = 1_000;
@@ -470,13 +471,58 @@ struct PreparedNotificationFilter {
     max_age_cutoff: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ActivityEvent {
-    id: String,
-    at: String,
-    action: String,
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanActivityData {
+    pub schema: String,
+    pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
+    pub segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_segments: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_segments: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_segments: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_incomplete: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityEvent {
+    pub id: String,
+    pub at: String,
+    /// Monotonic ordering assigned while holding the wiki mutation guard.
+    /// Legacy activity records predate this field and are folded first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional typed plan payload. Legacy activity records omit this field,
+    /// and existing session folding continues to use only `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanActivityData>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ActivityWrite {
+    pub history_path: String,
 }
 
 #[derive(Debug)]
@@ -533,6 +579,8 @@ struct ActivityScan {
     events: Vec<(DateTime<Utc>, ActivityEvent)>,
     warnings: Vec<StorageWarning>,
     warnings_total: usize,
+    entries_scanned: usize,
+    bytes_scanned: u64,
 }
 
 fn push_storage_warning(
@@ -554,13 +602,23 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn clean_field(name: &str, value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
         bail!("{name} cannot be empty");
     }
-    if value.chars().any(char::is_control) {
-        bail!("{name} must be one line and contain no control characters");
+    if value
+        .chars()
+        .any(|character| character.is_control() || is_bidi_control(character))
+    {
+        bail!("{name} must be one line and contain no control or bidi formatting characters");
     }
     Ok(value.to_string())
 }
@@ -588,6 +646,176 @@ fn validate_body(body: &str) -> Result<()> {
         .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
     {
         bail!("notification body contains an unsupported control character");
+    }
+    Ok(())
+}
+
+fn valid_plan_segment_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
+    for (name, value, max_bytes) in [
+        ("plan event schema", Some(data.schema.as_str()), 64_usize),
+        ("plan activity kind", Some(data.kind.as_str()), 32),
+        ("plan segment id", data.segment_id.as_deref(), 64),
+        ("plan from status", data.from_status.as_deref(), 16),
+        ("plan to status", data.to_status.as_deref(), 16),
+        ("plan log kind", data.log_kind.as_deref(), 32),
+        ("plan summary", data.summary.as_deref(), 8 * 1024),
+        ("plan note", data.note.as_deref(), 8 * 1024),
+        ("plan sha256", data.plan_sha256.as_deref(), 64),
+        ("plan receipt sha256", data.receipt_sha256.as_deref(), 64),
+    ] {
+        if let Some(value) = value {
+            if clean_field(name, value)?.len() > max_bytes {
+                bail!("{name} exceeds {max_bytes} bytes");
+            }
+        }
+    }
+    if data.schema != PLAN_EVENT_SCHEMA {
+        bail!("unsupported plan activity schema (expected {PLAN_EVENT_SCHEMA})");
+    }
+    if !matches!(
+        data.kind.as_str(),
+        "attached" | "status-changed" | "log" | "archived"
+    ) {
+        bail!("invalid plan activity kind");
+    }
+    for (name, value) in [
+        ("plan from status", data.from_status.as_deref()),
+        ("plan to status", data.to_status.as_deref()),
+    ] {
+        if value.is_some_and(|status| !matches!(status, "todo" | "doing" | "blocked" | "done")) {
+            bail!("invalid {name}");
+        }
+    }
+    if data
+        .log_kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "decision" | "blocker" | "progress" | "note"))
+    {
+        bail!("invalid plan log kind");
+    }
+    if data
+        .segment_id
+        .as_deref()
+        .is_some_and(|segment| !valid_plan_segment_id(segment))
+    {
+        bail!("invalid plan segment id");
+    }
+    for (name, value) in [
+        ("plan sha256", data.plan_sha256.as_deref()),
+        ("plan receipt sha256", data.receipt_sha256.as_deref()),
+    ] {
+        if value.is_some_and(|hash| {
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            bail!("{name} must be 64 lowercase hexadecimal characters");
+        }
+    }
+    for (name, value) in [
+        ("total segments", data.total_segments),
+        ("done segments", data.done_segments),
+        ("incomplete segments", data.incomplete_segments),
+    ] {
+        if value.is_some_and(|count| count > 4096) {
+            bail!("plan {name} exceeds the hard event ceiling");
+        }
+    }
+    if data.plan_sha256.is_none() {
+        bail!("plan activity is missing its plan hash");
+    }
+    match data.kind.as_str() {
+        "attached" => {
+            if data.segment_id.is_some()
+                || data.from_status.is_some()
+                || data.to_status.is_some()
+                || data.log_kind.is_some()
+                || data.summary.is_some()
+                || data.note.is_some()
+                || data.receipt_sha256.is_some()
+                || data.total_segments.is_some()
+                || data.done_segments.is_some()
+                || data.incomplete_segments.is_some()
+                || data.allow_incomplete.is_some()
+            {
+                bail!("attached plan activity contains unrelated fields");
+            }
+        }
+        "status-changed" => {
+            if data.segment_id.is_none() || data.from_status.is_none() || data.to_status.is_none() {
+                bail!("status-changed plan activity is missing transition fields");
+            }
+            if data.from_status == data.to_status {
+                bail!("status-changed plan activity must change status");
+            }
+            if data.log_kind.is_some()
+                || data.summary.is_some()
+                || data.receipt_sha256.is_some()
+                || data.total_segments.is_some()
+                || data.done_segments.is_some()
+                || data.incomplete_segments.is_some()
+                || data.allow_incomplete.is_some()
+            {
+                bail!("status-changed plan activity contains unrelated fields");
+            }
+        }
+        "log" => {
+            if data.log_kind.is_none() || data.summary.is_none() {
+                bail!("plan log activity requires kind and summary");
+            }
+            if data.from_status.is_some()
+                || data.to_status.is_some()
+                || data.note.is_some()
+                || data.receipt_sha256.is_some()
+                || data.total_segments.is_some()
+                || data.done_segments.is_some()
+                || data.incomplete_segments.is_some()
+                || data.allow_incomplete.is_some()
+            {
+                bail!("plan log activity contains unrelated fields");
+            }
+        }
+        "archived" => {
+            let (Some(total), Some(done), Some(incomplete)) = (
+                data.total_segments,
+                data.done_segments,
+                data.incomplete_segments,
+            ) else {
+                bail!("archived plan activity is missing segment counts");
+            };
+            if data.summary.is_none()
+                || data.receipt_sha256.is_none()
+                || data.allow_incomplete.is_none()
+            {
+                bail!("archived plan activity is missing receipt fields");
+            }
+            if total != done.saturating_add(incomplete) {
+                bail!("archived plan activity segment counts do not add up");
+            }
+            if data.segment_id.is_some()
+                || data.from_status.is_some()
+                || data.to_status.is_some()
+                || data.log_kind.is_some()
+                || data.note.is_some()
+            {
+                bail!("archived plan activity contains unrelated fields");
+            }
+        }
+        _ => unreachable!("plan activity kind was validated above"),
     }
     Ok(())
 }
@@ -670,28 +898,15 @@ fn ensure_real_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_bounded_regular_utf8(path: &Path, max_bytes: u64, label: &str) -> Result<String> {
-    let path_metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("inspecting {label} {}", path.display()))?;
-    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
-        bail!("{label} must be a regular file: {}", path.display());
-    }
-    let file =
-        fs::File::open(path).with_context(|| format!("opening {label} {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("inspecting open {label} {}", path.display()))?;
-    if !metadata.is_file() || metadata.len() > max_bytes {
-        bail!("{label} exceeds {max_bytes} bytes or is not a regular file");
-    }
-    let mut raw = String::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_string(&mut raw)
-        .with_context(|| format!("reading {label} {} as UTF-8", path.display()))?;
-    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > max_bytes {
-        bail!("{label} exceeds {max_bytes} bytes");
-    }
-    Ok(raw)
+pub(crate) fn read_bounded_regular_utf8(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String> {
+    let max_bytes =
+        usize::try_from(max_bytes).context("bounded regular-file byte limit exceeds usize")?;
+    crate::config::read_optional_bounded_regular_utf8(path, max_bytes, label)?
+        .with_context(|| format!("{label} does not exist: {}", path.display()))
 }
 
 fn ensure_sessions_dir(w: &Wiki) -> Result<PathBuf> {
@@ -723,6 +938,52 @@ fn activity_dir(w: &Wiki, id: &str) -> Result<PathBuf> {
     Ok(session_dir(w, id)?.join("activity"))
 }
 
+pub(crate) fn session_file_path(w: &Wiki, id: &str, file_name: &str) -> Result<PathBuf> {
+    if file_name.is_empty()
+        || file_name.starts_with('.')
+        || Path::new(file_name).components().count() != 1
+        || !file_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '.'))
+    {
+        bail!("session file name must be one safe, visible path component");
+    }
+    Ok(session_dir(w, id)?.join(file_name))
+}
+
+pub(crate) fn write_immutable_session_file_guarded(
+    w: &Wiki,
+    guard: &crate::publish::MutationGuard,
+    id: &str,
+    file_name: &str,
+    content: &str,
+) -> Result<String> {
+    w.ensure_mutation_guard(guard)?;
+    let session = load_session(w, id)?;
+    if session.status != "active" {
+        bail!("session '{id}' is closed");
+    }
+    let path = session_file_path(w, id, file_name)?;
+    write_new(&path, content)?;
+    Ok(format!("sessions/{id}/{file_name}"))
+}
+
+pub(crate) fn remove_session_file_guarded(
+    w: &Wiki,
+    guard: &crate::publish::MutationGuard,
+    id: &str,
+    file_name: &str,
+) -> Result<()> {
+    w.ensure_mutation_guard(guard)?;
+    let path = session_file_path(w, id, file_name)?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspecting session file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("session file must be a regular file: {}", path.display());
+    }
+    fs::remove_file(&path).with_context(|| format!("removing session file {}", path.display()))
+}
+
 #[cfg(windows)]
 fn publish_new_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     // Windows rename is no-replace when the destination already exists.
@@ -739,7 +1000,7 @@ fn publish_new_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
 /// Publish an immutable file without ever exposing a partial final record.
 /// The complete, synced temporary is hard-linked into place; hard-link creation
 /// is atomic and refuses an existing destination on Unix and Windows.
-fn write_new(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_new(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
         .context("state file has no parent directory")?;
@@ -809,7 +1070,7 @@ fn load_session_with_budget(
     w: &Wiki,
     id: &str,
     mut budget: Option<&mut StorageScanBudget>,
-) -> Result<(Session, Vec<StorageWarning>, usize)> {
+) -> Result<(Session, Vec<StorageWarning>, usize, Vec<ActivityEvent>)> {
     let path = session_path(w, id)?;
     if let Some(budget) = budget.as_deref_mut() {
         let metadata = fs::symlink_metadata(&path)
@@ -875,23 +1136,33 @@ fn load_session_with_budget(
         mut events,
         warnings,
         warnings_total,
+        ..
     } = scan_activity(w, id, budget)?;
-    events.sort_by(|(a_time, a), (b_time, b)| a_time.cmp(b_time).then(a.id.cmp(&b.id)));
-    for (event_time, event) in events {
-        if event_time >= effective_updated_at {
-            effective_updated_at = event_time;
+    validate_activity_sequences(&events)?;
+    sort_activity_events(&mut events);
+    for (event_time, event) in &events {
+        if *event_time >= effective_updated_at {
+            effective_updated_at = *event_time;
             session.updated_at = event.at.clone();
-            session.last_seen_at = Some(event.at);
-            if let Some(status) = event.status {
-                session.status = status;
-            }
+            session.last_seen_at = Some(event.at.clone());
+        }
+        // Sequence (or legacy chronological order) is authoritative for
+        // lifecycle folding. Wall-clock regressions must not reopen a session
+        // or hide an archive close.
+        if let Some(status) = &event.status {
+            session.status = status.clone();
         }
     }
-    Ok((session, warnings, warnings_total))
+    Ok((
+        session,
+        warnings,
+        warnings_total,
+        events.into_iter().map(|(_, event)| event).collect(),
+    ))
 }
 
-fn load_session(w: &Wiki, id: &str) -> Result<Session> {
-    load_session_with_budget(w, id, None).map(|(session, _, _)| session)
+pub(crate) fn load_session(w: &Wiki, id: &str) -> Result<Session> {
+    load_session_with_budget(w, id, None).map(|(session, _, _, _)| session)
 }
 
 fn parse_activity_event(path: &Path) -> Result<(DateTime<Utc>, ActivityEvent)> {
@@ -902,17 +1173,90 @@ fn parse_activity_event(path: &Path) -> Result<(DateTime<Utc>, ActivityEvent)> {
         bail!("activity id does not match its filename");
     }
     let timestamp = parse_time("activity", &event.at)?;
+    if event.sequence == Some(0) {
+        bail!("activity sequence must be greater than zero");
+    }
     if clean_field("activity action", &event.action)?.len() > 128 {
         bail!("activity action exceeds 128 bytes");
+    }
+    if event.status.as_deref() == Some("active") {
+        bail!("activity records may not explicitly reopen a session");
     }
     if event
         .status
         .as_deref()
-        .is_some_and(|status| !matches!(status, "active" | "closed"))
+        .is_some_and(|status| status != "closed")
     {
         bail!("invalid activity status");
     }
+    if let Some(plan) = &event.plan {
+        validate_plan_activity(plan)?;
+        let expected_action = match plan.kind.as_str() {
+            "attached" => "plan-attached",
+            "status-changed" => "plan-status",
+            "log" => "plan-log",
+            "archived" => "plan-archived",
+            _ => unreachable!("plan activity kind was validated"),
+        };
+        if event.action != expected_action {
+            bail!("plan activity action does not match its structured kind");
+        }
+        if (plan.kind == "archived") != (event.status.as_deref() == Some("closed")) {
+            bail!("only an archived plan activity may close its session");
+        }
+    } else if (event.action == "close") != (event.status.as_deref() == Some("closed")) {
+        bail!("generic close activity and closed status must appear together");
+    }
     Ok((timestamp, event))
+}
+
+fn validate_activity_sequences(events: &[(DateTime<Utc>, ActivityEvent)]) -> Result<()> {
+    let mut sequences = BTreeSet::new();
+    for (_, event) in events {
+        let Some(sequence) = event.sequence else {
+            continue;
+        };
+        if sequence == 0 {
+            bail!("activity '{}' has an invalid zero sequence", event.id);
+        }
+        if !sequences.insert(sequence) {
+            bail!("duplicate activity sequence {sequence}");
+        }
+    }
+    let first_sequenced_at = events
+        .iter()
+        .filter_map(|(at, event)| event.sequence.map(|_| *at))
+        .min();
+    if let Some(first_sequenced_at) = first_sequenced_at {
+        for (at, event) in events {
+            if event.sequence.is_none() && *at > first_sequenced_at {
+                bail!(
+                    "legacy activity '{}' appears after sequenced activity in timestamp order; refusing an ambiguous mixed stream",
+                    event.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_activity_events(
+    a: &(DateTime<Utc>, ActivityEvent),
+    b: &(DateTime<Utc>, ActivityEvent),
+) -> CmpOrdering {
+    match (a.1.sequence, b.1.sequence) {
+        (None, None) => a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)),
+        (None, Some(_)) => CmpOrdering::Less,
+        (Some(_), None) => CmpOrdering::Greater,
+        (Some(a_sequence), Some(b_sequence)) => a_sequence
+            .cmp(&b_sequence)
+            .then(a.0.cmp(&b.0))
+            .then(a.1.id.cmp(&b.1.id)),
+    }
+}
+
+fn sort_activity_events(events: &mut [(DateTime<Utc>, ActivityEvent)]) {
+    events.sort_by(compare_activity_events);
 }
 
 fn scan_activity(
@@ -1003,7 +1347,29 @@ fn scan_activity(
             ),
         }
     }
+    scan.entries_scanned = local_entries;
+    scan.bytes_scanned = local_bytes;
     Ok(scan)
+}
+
+pub(crate) fn ordered_activity_events(w: &Wiki, id: &str) -> Result<Vec<ActivityEvent>> {
+    load_session_and_activity(w, id).map(|(_, events)| events)
+}
+
+pub(crate) fn load_session_and_activity(
+    w: &Wiki,
+    id: &str,
+) -> Result<(Session, Vec<ActivityEvent>)> {
+    let (session, warnings, warnings_total, events) = load_session_with_budget(w, id, None)?;
+    if warnings_total > 0 {
+        return Err(activity_warning_error(
+            id,
+            &warnings,
+            warnings_total,
+            "an incomplete plan snapshot",
+        ));
+    }
+    Ok((session, events))
 }
 
 fn create_session_file(
@@ -1399,6 +1765,197 @@ struct ActivityRecord {
     history_path: Option<String>,
 }
 
+struct ActivityAppendState {
+    next_sequence: u64,
+    max_prior_at: Option<DateTime<Utc>>,
+    entries_scanned: usize,
+    bytes_scanned: u64,
+}
+
+fn activity_warning_error(
+    id: &str,
+    warnings: &[StorageWarning],
+    warnings_total: usize,
+    purpose: &str,
+) -> anyhow::Error {
+    let details = warnings
+        .iter()
+        .take(3)
+        .map(|warning| format!("{}: {}", warning.path, warning.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::anyhow!(
+        "session '{id}' has {warnings_total} invalid activity record(s); refusing {purpose}{}",
+        if details.is_empty() {
+            String::new()
+        } else {
+            format!(": {details}")
+        }
+    )
+}
+
+fn prepare_activity_append(
+    w: &Wiki,
+    guard: &crate::publish::MutationGuard,
+    id: &str,
+) -> Result<ActivityAppendState> {
+    w.ensure_mutation_guard(guard)?;
+    let scan = scan_activity(w, id, None)?;
+    if scan.warnings_total > 0 {
+        return Err(activity_warning_error(
+            id,
+            &scan.warnings,
+            scan.warnings_total,
+            "a new activity append",
+        ));
+    }
+    validate_activity_sequences(&scan.events)?;
+    let max_sequence = scan
+        .events
+        .iter()
+        .filter_map(|(_, event)| event.sequence)
+        .max()
+        .unwrap_or(0);
+    let event_count =
+        u64::try_from(scan.events.len()).context("activity event count exceeds u64")?;
+    let next_sequence = max_sequence
+        .max(event_count)
+        .checked_add(1)
+        .context("activity sequence overflow")?;
+    let max_prior_at = scan.events.iter().map(|(at, _)| *at).max();
+    Ok(ActivityAppendState {
+        next_sequence,
+        max_prior_at,
+        entries_scanned: scan.entries_scanned,
+        bytes_scanned: scan.bytes_scanned,
+    })
+}
+
+fn activity_append_timestamp(state: &ActivityAppendState) -> String {
+    let current = Utc::now();
+    let timestamp = state
+        .max_prior_at
+        .map_or(current, |prior| prior.max(current));
+    timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+fn serialize_activity_event(event: &ActivityEvent) -> Result<String> {
+    let mut serialized = toml::to_string_pretty(event)?;
+    if !serialized.ends_with('\n') {
+        serialized.push('\n');
+    }
+    if u64::try_from(serialized.len()).unwrap_or(u64::MAX) > MAX_ACTIVITY_FILE_BYTES {
+        bail!("activity entry exceeds the hard {MAX_ACTIVITY_FILE_BYTES}-byte per-file ceiling");
+    }
+    Ok(serialized)
+}
+
+fn preflight_activity_append(state: &ActivityAppendState, serialized: &str) -> Result<()> {
+    let entries = state
+        .entries_scanned
+        .checked_add(1)
+        .context("activity entry count overflow")?;
+    if entries > MAX_ACTIVITY_ENTRIES_PER_SESSION {
+        bail!(
+            "activity append would exceed the hard ceiling of {MAX_ACTIVITY_ENTRIES_PER_SESSION} entries"
+        );
+    }
+    let serialized_bytes =
+        u64::try_from(serialized.len()).context("serialized activity size exceeds u64")?;
+    let bytes = state
+        .bytes_scanned
+        .checked_add(serialized_bytes)
+        .context("activity byte count overflow")?;
+    if bytes > MAX_ACTIVITY_BYTES_PER_SESSION {
+        bail!(
+            "activity append would exceed the hard ceiling of {MAX_ACTIVITY_BYTES_PER_SESSION} bytes"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn append_structured_activity_guarded(
+    w: &Wiki,
+    guard: &crate::publish::MutationGuard,
+    id: &str,
+    action: &str,
+    session_status: Option<&str>,
+    plan: PlanActivityData,
+) -> Result<ActivityWrite> {
+    w.ensure_mutation_guard(guard)?;
+    let session = load_session(w, id)?;
+    if session.status != "active" {
+        bail!("session '{id}' is closed");
+    }
+    let action = clean_field("activity", action)?;
+    if action.len() > 128 {
+        bail!("activity action exceeds 128 bytes");
+    }
+    if session_status.is_some_and(|status| status != "closed") {
+        bail!("invalid activity status");
+    }
+    validate_plan_activity(&plan)?;
+    let expected_action = match plan.kind.as_str() {
+        "attached" => "plan-attached",
+        "status-changed" => "plan-status",
+        "log" => "plan-log",
+        "archived" => "plan-archived",
+        _ => unreachable!("plan activity kind was validated"),
+    };
+    if action != expected_action {
+        bail!("plan activity action does not match its structured kind");
+    }
+    if (plan.kind == "archived") != (session_status == Some("closed")) {
+        bail!("only an archived plan activity may close its session");
+    }
+
+    let append_state = prepare_activity_append(w, guard, id)?;
+    let timestamp = activity_append_timestamp(&append_state);
+    let dir = ensure_child_dir(&session_dir(w, id)?, "activity")?;
+    let mut written = None;
+    for attempt in 0..100 {
+        let event_id = unique_id("activity", attempt);
+        let event = ActivityEvent {
+            id: event_id.clone(),
+            at: timestamp.clone(),
+            sequence: Some(append_state.next_sequence),
+            action: action.clone(),
+            status: session_status.map(str::to_string),
+            plan: Some(plan.clone()),
+        };
+        let serialized = serialize_activity_event(&event)?;
+        preflight_activity_append(&append_state, &serialized)?;
+        let path = dir.join(format!("{event_id}.toml"));
+        match write_new(&path, &serialized) {
+            Ok(()) => {
+                written = Some(event);
+                break;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let event = written.context("could not allocate a unique activity event id")?;
+    Ok(ActivityWrite {
+        history_path: format!("sessions/{id}/activity/{}.toml", event.id),
+    })
+}
+
+pub(crate) fn commit_session_paths_guarded(
+    w: &Wiki,
+    guard: &crate::publish::MutationGuard,
+    message: &str,
+    paths: &[String],
+) -> Result<()> {
+    commit_session_paths(w, guard, message, paths)
+}
+
 fn commit_session_paths(
     w: &Wiki,
     guard: &crate::publish::MutationGuard,
@@ -1428,7 +1985,8 @@ fn record_activity(
             history_path: None,
         });
     }
-    let timestamp = now();
+    let append_state = prepare_activity_append(w, guard, id)?;
+    let timestamp = activity_append_timestamp(&append_state);
     if !force {
         let last = session
             .last_seen_at
@@ -1450,6 +2008,18 @@ fn record_activity(
     }
 
     let action = clean_field("activity", action)?;
+    if action.len() > 128 {
+        bail!("activity action exceeds 128 bytes");
+    }
+    if status == Some("active") {
+        bail!("activity records may not explicitly reopen a session");
+    }
+    if status.is_some_and(|value| value != "closed") {
+        bail!("invalid activity status");
+    }
+    if (action == "close") != (status == Some("closed")) {
+        bail!("generic close activity and closed status must appear together");
+    }
     let dir = ensure_child_dir(&session_dir(w, id)?, "activity")?;
     let mut written = None;
     for attempt in 0..100 {
@@ -1457,11 +2027,15 @@ fn record_activity(
         let event = ActivityEvent {
             id: event_id.clone(),
             at: timestamp.clone(),
+            sequence: Some(append_state.next_sequence),
             action: action.clone(),
             status: status.map(str::to_string),
+            plan: None,
         };
+        let serialized = serialize_activity_event(&event)?;
+        preflight_activity_append(&append_state, &serialized)?;
         let path = dir.join(format!("{event_id}.toml"));
-        match write_new(&path, &toml::to_string_pretty(&event)?) {
+        match write_new(&path, &serialized) {
             Ok(()) => {
                 written = Some(event);
                 break;
@@ -2136,7 +2710,7 @@ fn scan_sessions(w: &Wiki, request: &SessionListRequest) -> Result<SessionStorag
                 }
             }
             match load_session_with_budget(w, &id, Some(&mut budget)) {
-                Ok((session, activity_warnings, activity_warnings_total)) => {
+                Ok((session, activity_warnings, activity_warnings_total, _)) => {
                     result.warnings_total = result
                         .warnings_total
                         .saturating_add(activity_warnings_total);
@@ -2325,12 +2899,20 @@ fn compact_session_summary(value: &str) -> (String, bool) {
     (format!("{}{}", &value[..end], suffix), true)
 }
 
-pub fn show_with_options(
+pub(crate) fn show_result(
     w: &Wiki,
     id: &str,
     request: &SessionShowRequest,
-    json: bool,
-) -> Result<String> {
+) -> Result<SessionShowResult> {
+    let session = load_session(w, id)?;
+    show_result_for_session(w, session, request)
+}
+
+pub(crate) fn show_result_for_session(
+    w: &Wiki,
+    session: Session,
+    request: &SessionShowRequest,
+) -> Result<SessionShowResult> {
     let limit = request.limit.unwrap_or(DEFAULT_SESSION_SHOW_LIMIT);
     if limit == 0 {
         bail!("session show limit must be greater than zero");
@@ -2340,7 +2922,7 @@ pub fn show_with_options(
             "session show limit {limit} exceeds the hard response ceiling {MAX_SESSION_RESPONSE_LIMIT}"
         );
     }
-    let session = load_session(w, id)?;
+    let id = session.id.as_str();
     let scan = scan_notifications(w);
     let mut sent: Vec<StoredNotification> = scan
         .notifications
@@ -2369,7 +2951,7 @@ pub fn show_with_options(
             }
         })
         .collect::<Vec<_>>();
-    let result = SessionShowResult {
+    Ok(SessionShowResult {
         session,
         notifications_returned: notifications_sent.len(),
         notifications_omitted: total_notifications_sent.saturating_sub(end),
@@ -2383,7 +2965,16 @@ pub fn show_with_options(
         warnings_total: scan.warnings_total,
         warnings_omitted: scan.warnings_total.saturating_sub(scan.warnings.len()),
         warnings: scan.warnings,
-    };
+    })
+}
+
+pub fn show_with_options(
+    w: &Wiki,
+    id: &str,
+    request: &SessionShowRequest,
+    json: bool,
+) -> Result<String> {
+    let result = show_result(w, id, request)?;
     if json {
         return Ok(serde_json::to_string(&result)?);
     }
@@ -2444,6 +3035,30 @@ pub fn heartbeat(w: &Wiki, id: &str, force: bool) -> Result<Session> {
 
 pub fn close(w: &Wiki, id: &str, json: bool) -> Result<String> {
     let guard = w.acquire_mutation_guard()?;
+    let plan_path = session_file_path(w, id, "plan.toml")?;
+    let has_plan_entry = match fs::symlink_metadata(&plan_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting session plan {}", plan_path.display()));
+        }
+    };
+    if has_plan_entry {
+        let (_, events) = load_session_and_activity(w, id)?;
+        let has_archive = events.iter().any(|event| {
+            event.plan.as_ref().is_some_and(|plan| {
+                plan.schema == PLAN_EVENT_SCHEMA
+                    && plan.kind == "archived"
+                    && event.status.as_deref() == Some("closed")
+            })
+        });
+        if !has_archive {
+            bail!(
+                "session '{id}' has an attached plan; close it with `wookie plan --session {id} archive` (add `--allow-incomplete` explicitly if needed)"
+            );
+        }
+    }
     let activity = record_activity(w, &guard, id, "close", Some("closed"), true)?;
     if let Some(path) = activity.history_path.as_ref() {
         commit_session_paths(
@@ -3717,6 +4332,304 @@ mod tests {
         let listed = list_with_options(&fixture.wiki, &SessionListRequest::default()).unwrap();
         assert!(!listed.scan_complete);
         assert!(listed.sessions.is_empty());
+    }
+
+    #[test]
+    fn sequenced_close_folds_despite_clock_regression() {
+        let fixture = Fixture::new();
+        let session = start_test_session(&fixture.wiki, "clock", 0);
+        let dir = activity_dir(&fixture.wiki, &session.id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let later = ActivityEvent {
+            id: "activity-20990101-000000-ffffffff".into(),
+            at: "2099-01-01T00:00:00.000Z".into(),
+            sequence: Some(1),
+            action: "heartbeat".into(),
+            status: None,
+            plan: None,
+        };
+        let regressed_close = ActivityEvent {
+            id: "activity-20000101-000000-aaaaaaaa".into(),
+            at: "2000-01-01T00:00:00.000Z".into(),
+            sequence: Some(2),
+            action: "close".into(),
+            status: Some("closed".into()),
+            plan: None,
+        };
+        for event in [&later, &regressed_close] {
+            fs::write(
+                dir.join(format!("{}.toml", event.id)),
+                serialize_activity_event(event).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let loaded = load_session(&fixture.wiki, &session.id).unwrap();
+        assert_eq!(loaded.status, "closed");
+        assert_eq!(loaded.updated_at, later.at);
+    }
+
+    #[test]
+    fn first_sequenced_event_may_share_last_legacy_millisecond() {
+        let fixture = Fixture::new();
+        let session = start_test_session(&fixture.wiki, "migration", 0);
+        let dir = activity_dir(&fixture.wiki, &session.id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let at = session.created_at.clone();
+        let legacy = ActivityEvent {
+            id: "activity-20260725-120000-zzzzzzzz".into(),
+            at: at.clone(),
+            sequence: None,
+            action: "heartbeat".into(),
+            status: None,
+            plan: None,
+        };
+        let sequenced = ActivityEvent {
+            id: "activity-20260725-120000-aaaaaaaa".into(),
+            at,
+            sequence: Some(1),
+            action: "close".into(),
+            status: Some("closed".into()),
+            plan: None,
+        };
+        for event in [&legacy, &sequenced] {
+            fs::write(
+                dir.join(format!("{}.toml", event.id)),
+                serialize_activity_event(event).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let (loaded, ordered) = load_session_and_activity(&fixture.wiki, &session.id).unwrap();
+        assert_eq!(loaded.status, "closed");
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![legacy.id.as_str(), sequenced.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn future_legacy_event_keeps_first_sequenced_append_readable() {
+        let fixture = Fixture::new();
+        let future_at = "2099-01-01T00:00:00.123456789Z";
+
+        let structured = start_test_session(&fixture.wiki, "structured-future", 0);
+        let structured_dir = activity_dir(&fixture.wiki, &structured.id).unwrap();
+        fs::create_dir_all(&structured_dir).unwrap();
+        let structured_legacy = ActivityEvent {
+            id: "activity-20990101-000000-aaaaaaaa".into(),
+            at: future_at.into(),
+            sequence: None,
+            action: "heartbeat".into(),
+            status: None,
+            plan: None,
+        };
+        fs::write(
+            structured_dir.join(format!("{}.toml", structured_legacy.id)),
+            serialize_activity_event(&structured_legacy).unwrap(),
+        )
+        .unwrap();
+        let guard = fixture.wiki.acquire_mutation_guard().unwrap();
+        append_structured_activity_guarded(
+            &fixture.wiki,
+            &guard,
+            &structured.id,
+            "plan-log",
+            None,
+            PlanActivityData {
+                schema: PLAN_EVENT_SCHEMA.into(),
+                kind: "log".into(),
+                segment_id: None,
+                from_status: None,
+                to_status: None,
+                log_kind: Some("progress".into()),
+                summary: Some("Monotonic migration append.".into()),
+                note: None,
+                plan_sha256: Some("a".repeat(64)),
+                receipt_sha256: None,
+                total_segments: None,
+                done_segments: None,
+                incomplete_segments: None,
+                allow_incomplete: None,
+            },
+        )
+        .unwrap();
+        drop(guard);
+        let (_, structured_events) =
+            load_session_and_activity(&fixture.wiki, &structured.id).unwrap();
+        assert_eq!(structured_events[0].id, structured_legacy.id);
+        assert_eq!(structured_events[1].sequence, Some(2));
+        assert!(
+            parse_time("new structured activity", &structured_events[1].at).unwrap()
+                >= parse_time("future legacy activity", future_at).unwrap()
+        );
+
+        let generic = start_test_session(&fixture.wiki, "generic-future", 0);
+        let generic_dir = activity_dir(&fixture.wiki, &generic.id).unwrap();
+        fs::create_dir_all(&generic_dir).unwrap();
+        let generic_legacy = ActivityEvent {
+            id: "activity-20990101-000000-bbbbbbbb".into(),
+            at: future_at.into(),
+            sequence: None,
+            action: "heartbeat".into(),
+            status: None,
+            plan: None,
+        };
+        fs::write(
+            generic_dir.join(format!("{}.toml", generic_legacy.id)),
+            serialize_activity_event(&generic_legacy).unwrap(),
+        )
+        .unwrap();
+        close(&fixture.wiki, &generic.id, false).unwrap();
+        let (closed, generic_events) =
+            load_session_and_activity(&fixture.wiki, &generic.id).unwrap();
+        assert_eq!(closed.status, "closed");
+        assert_eq!(generic_events[0].id, generic_legacy.id);
+        assert_eq!(generic_events[1].sequence, Some(2));
+        assert!(
+            parse_time("new generic activity", &generic_events[1].at).unwrap()
+                >= parse_time("future legacy activity", future_at).unwrap()
+        );
+    }
+
+    #[test]
+    fn activity_sequences_reject_zero_duplicates_and_forged_reopen() {
+        let fixture = Fixture::new();
+        let session = start_test_session(&fixture.wiki, "sequence", 0);
+        let dir = activity_dir(&fixture.wiki, &session.id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let close_event = ActivityEvent {
+            id: "activity-20260725-120000-aaaaaaaa".into(),
+            at: "2026-07-25T12:00:00.000Z".into(),
+            sequence: Some(1),
+            action: "close".into(),
+            status: Some("closed".into()),
+            plan: None,
+        };
+        fs::write(
+            dir.join(format!("{}.toml", close_event.id)),
+            serialize_activity_event(&close_event).unwrap(),
+        )
+        .unwrap();
+        let forged = ActivityEvent {
+            id: "activity-20260725-120001-bbbbbbbb".into(),
+            at: "2026-07-25T12:00:01.000Z".into(),
+            sequence: Some(2),
+            action: "heartbeat".into(),
+            status: Some("active".into()),
+            plan: None,
+        };
+        // Serialize directly because the production serializer correctly
+        // refuses no fields; persisted parsing is the boundary under test.
+        fs::write(
+            dir.join(format!("{}.toml", forged.id)),
+            toml::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+        assert!(load_session_and_activity(&fixture.wiki, &session.id)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid activity record"));
+
+        fs::remove_file(dir.join(format!("{}.toml", forged.id))).unwrap();
+        let duplicate = ActivityEvent {
+            id: "activity-20260725-120002-cccccccc".into(),
+            at: "2026-07-25T12:00:02.000Z".into(),
+            sequence: Some(1),
+            action: "heartbeat".into(),
+            status: None,
+            plan: None,
+        };
+        fs::write(
+            dir.join(format!("{}.toml", duplicate.id)),
+            serialize_activity_event(&duplicate).unwrap(),
+        )
+        .unwrap();
+        assert!(load_session(&fixture.wiki, &session.id)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate activity sequence"));
+
+        fs::remove_file(dir.join(format!("{}.toml", duplicate.id))).unwrap();
+        let mut zero = close_event;
+        zero.id = "activity-20260725-120003-dddddddd".into();
+        zero.sequence = Some(0);
+        fs::write(
+            dir.join(format!("{}.toml", zero.id)),
+            toml::to_string_pretty(&zero).unwrap(),
+        )
+        .unwrap();
+        assert!(load_session_and_activity(&fixture.wiki, &session.id)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid activity record"));
+    }
+
+    #[test]
+    fn structured_activity_rejects_bidi_and_preflights_storage_ceilings() {
+        let plan = PlanActivityData {
+            schema: PLAN_EVENT_SCHEMA.into(),
+            kind: "log".into(),
+            segment_id: None,
+            from_status: None,
+            to_status: None,
+            log_kind: Some("progress".into()),
+            summary: Some("looks safe\u{061c}but is reordered".into()),
+            note: None,
+            plan_sha256: Some("a".repeat(64)),
+            receipt_sha256: None,
+            total_segments: None,
+            done_segments: None,
+            incomplete_segments: None,
+            allow_incomplete: None,
+        };
+        let error = validate_plan_activity(&plan).unwrap_err().to_string();
+        assert!(error.contains("bidi"));
+        assert!(!error.contains('\u{061c}'));
+
+        let full_entries = ActivityAppendState {
+            next_sequence: 1,
+            max_prior_at: None,
+            entries_scanned: MAX_ACTIVITY_ENTRIES_PER_SESSION,
+            bytes_scanned: 0,
+        };
+        assert!(preflight_activity_append(&full_entries, "x\n")
+            .unwrap_err()
+            .to_string()
+            .contains("entries"));
+        let full_bytes = ActivityAppendState {
+            next_sequence: 1,
+            max_prior_at: None,
+            entries_scanned: 0,
+            bytes_scanned: MAX_ACTIVITY_BYTES_PER_SESSION,
+        };
+        assert!(preflight_activity_append(&full_bytes, "x\n")
+            .unwrap_err()
+            .to_string()
+            .contains("bytes"));
+    }
+
+    #[test]
+    fn generic_close_refuses_to_strand_an_attached_plan() {
+        let fixture = Fixture::new();
+        let session = start_test_session(&fixture.wiki, "planner", 0);
+        fs::write(
+            session_file_path(&fixture.wiki, &session.id, "plan.toml").unwrap(),
+            "schema = \"wookie.plan/v1\"\n",
+        )
+        .unwrap();
+
+        let error = close(&fixture.wiki, &session.id, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wookie plan"));
+        assert_eq!(
+            load_session(&fixture.wiki, &session.id).unwrap().status,
+            "active"
+        );
     }
 
     #[test]

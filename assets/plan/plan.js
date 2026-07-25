@@ -17,6 +17,8 @@
     sessionAgent: document.getElementById("session-agent"),
     sessionId: document.getElementById("session-id"),
     sessionProgress: document.getElementById("session-progress"),
+    linearFact: document.getElementById("linear-fact"),
+    linearProject: document.getElementById("linear-project"),
     connectionStatus: document.getElementById("connection-status"),
     connectionLabel: document.getElementById("connection-label"),
     stateBanner: document.getElementById("state-banner"),
@@ -191,7 +193,17 @@
       blockedBy,
       ready: bool(source.ready, readyFallback),
       order: Number.isFinite(Number(source.order)) ? Number(source.order) : index,
+      linearIssue: null,
     };
+  }
+
+  function linearUrl(value) {
+    const candidate = text(value);
+    return candidate.startsWith("https://linear.app/") &&
+      !candidate.includes("?") &&
+      !candidate.includes("#")
+      ? candidate
+      : "";
   }
 
   function normalizeSnapshot(raw) {
@@ -203,6 +215,24 @@
       "Untitled plan",
     );
     const segments = asArray(source.segments ?? plan.segments).map(normalizeSegment);
+    const linearSource = asObject(source.linear);
+    const linearIssues = new Map(
+      asArray(linearSource.issues).map((issue) => {
+        const item = asObject(issue);
+        return [
+          text(item.segment_id),
+          {
+            id: text(item.id),
+            url: linearUrl(item.url),
+            status: normalizeStatus(item.status),
+          },
+        ];
+      }),
+    );
+    segments.forEach((segment) => {
+      segment.linearIssue = linearIssues.get(segment.id) || null;
+    });
+    const linearProject = asObject(linearSource.project);
 
     return {
       schema: text(source.schema),
@@ -215,6 +245,14 @@
       ),
       session,
       segments,
+      linear: {
+        project: {
+          id: text(linearProject.id),
+          url: linearUrl(linearProject.url),
+        },
+        linkHash: text(linearSource.link_sha256),
+        syncHash: text(linearSource.sync_sha256),
+      },
       events: asArray(source.events),
       eventsTotal: integer(source.events_total, asArray(source.events).length),
       eventsOmitted: integer(source.events_omitted),
@@ -407,6 +445,21 @@
 
     openButton.addEventListener("click", () => openSegment(segment, false));
     card.append(openButton, guideButton);
+    if (segment.linearIssue?.url) {
+      const linearLink = createElement(
+        "a",
+        "card-linear",
+        segment.linearIssue.id || "Linear",
+      );
+      linearLink.href = segment.linearIssue.url;
+      linearLink.target = "_blank";
+      linearLink.rel = "noopener noreferrer";
+      linearLink.setAttribute(
+        "aria-label",
+        `Open Linear issue for ${segment.title}`,
+      );
+      card.append(linearLink);
+    }
     return card;
   }
 
@@ -433,6 +486,15 @@
     ]);
     elements.sessionProgress.textContent =
       total > 0 ? `${done}/${total} done` : "No segments";
+    const projectUrl = snapshot.linear.project.url;
+    elements.linearFact.hidden = !projectUrl;
+    if (projectUrl) {
+      elements.linearProject.href = projectUrl;
+      elements.linearProject.textContent =
+        snapshot.linear.project.id || "Open epic";
+    } else {
+      elements.linearProject.removeAttribute("href");
+    }
     elements.planHeading.textContent = snapshot.title;
     elements.planDescription.textContent = snapshot.description;
     elements.planCount.textContent = formatCount(total, "segment", "segments");

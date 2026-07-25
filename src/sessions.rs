@@ -500,6 +500,8 @@ pub struct PlanActivityData {
     pub incomplete_segments: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_incomplete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -675,6 +677,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
         ("plan note", data.note.as_deref(), 8 * 1024),
         ("plan sha256", data.plan_sha256.as_deref(), 64),
         ("plan receipt sha256", data.receipt_sha256.as_deref(), 64),
+        ("plan Linear sha256", data.linear_sha256.as_deref(), 64),
     ] {
         if let Some(value) = value {
             if clean_field(name, value)?.len() > max_bytes {
@@ -687,7 +690,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
     }
     if !matches!(
         data.kind.as_str(),
-        "attached" | "status-changed" | "log" | "archived"
+        "attached" | "status-changed" | "log" | "linear-linked" | "linear-synced" | "archived"
     ) {
         bail!("invalid plan activity kind");
     }
@@ -716,6 +719,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
     for (name, value) in [
         ("plan sha256", data.plan_sha256.as_deref()),
         ("plan receipt sha256", data.receipt_sha256.as_deref()),
+        ("plan Linear sha256", data.linear_sha256.as_deref()),
     ] {
         if value.is_some_and(|hash| {
             hash.len() != 64
@@ -751,6 +755,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
                 || data.done_segments.is_some()
                 || data.incomplete_segments.is_some()
                 || data.allow_incomplete.is_some()
+                || data.linear_sha256.is_some()
             {
                 bail!("attached plan activity contains unrelated fields");
             }
@@ -769,6 +774,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
                 || data.done_segments.is_some()
                 || data.incomplete_segments.is_some()
                 || data.allow_incomplete.is_some()
+                || data.linear_sha256.is_some()
             {
                 bail!("status-changed plan activity contains unrelated fields");
             }
@@ -785,8 +791,28 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
                 || data.done_segments.is_some()
                 || data.incomplete_segments.is_some()
                 || data.allow_incomplete.is_some()
+                || data.linear_sha256.is_some()
             {
                 bail!("plan log activity contains unrelated fields");
+            }
+        }
+        "linear-linked" | "linear-synced" => {
+            if data.linear_sha256.is_none() {
+                bail!("Linear plan activity is missing its record hash");
+            }
+            if data.segment_id.is_some()
+                || data.from_status.is_some()
+                || data.to_status.is_some()
+                || data.log_kind.is_some()
+                || data.summary.is_some()
+                || data.note.is_some()
+                || data.receipt_sha256.is_some()
+                || data.total_segments.is_some()
+                || data.done_segments.is_some()
+                || data.incomplete_segments.is_some()
+                || data.allow_incomplete.is_some()
+            {
+                bail!("Linear plan activity contains unrelated fields");
             }
         }
         "archived" => {
@@ -811,6 +837,7 @@ fn validate_plan_activity(data: &PlanActivityData) -> Result<()> {
                 || data.to_status.is_some()
                 || data.log_kind.is_some()
                 || data.note.is_some()
+                || data.linear_sha256.is_some()
             {
                 bail!("archived plan activity contains unrelated fields");
             }
@@ -1195,6 +1222,8 @@ fn parse_activity_event(path: &Path) -> Result<(DateTime<Utc>, ActivityEvent)> {
             "attached" => "plan-attached",
             "status-changed" => "plan-status",
             "log" => "plan-log",
+            "linear-linked" => "plan-linear-linked",
+            "linear-synced" => "plan-linear-synced",
             "archived" => "plan-archived",
             _ => unreachable!("plan activity kind was validated"),
         };
@@ -1899,6 +1928,8 @@ pub(crate) fn append_structured_activity_guarded(
         "attached" => "plan-attached",
         "status-changed" => "plan-status",
         "log" => "plan-log",
+        "linear-linked" => "plan-linear-linked",
+        "linear-synced" => "plan-linear-synced",
         "archived" => "plan-archived",
         _ => unreachable!("plan activity kind was validated"),
     };
@@ -4454,6 +4485,7 @@ mod tests {
                 done_segments: None,
                 incomplete_segments: None,
                 allow_incomplete: None,
+                linear_sha256: None,
             },
         )
         .unwrap();
@@ -4585,6 +4617,7 @@ mod tests {
             done_segments: None,
             incomplete_segments: None,
             allow_incomplete: None,
+            linear_sha256: None,
         };
         let error = validate_plan_activity(&plan).unwrap_err().to_string();
         assert!(error.contains("bidi"));

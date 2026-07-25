@@ -534,6 +534,30 @@ enum PlanCmd {
         #[arg(long)]
         allow_incomplete: bool,
     },
+    /// Bridge the attached plan to a Linear Project and issues through an agent's Linear MCP
+    Linear {
+        #[command(subcommand)]
+        cmd: PlanLinearCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanLinearCmd {
+    /// Export a deterministic Linear Project and issue creation manifest
+    Export,
+    /// Persist the complete Linear Project and issue mapping from TOML
+    Link {
+        /// TOML link file; omit to read stdin
+        file: Option<PathBuf>,
+    },
+    /// Compare observed Linear semantic statuses with Wookie's last sync anchor
+    Reconcile {
+        /// TOML observation file; omit to read stdin
+        file: Option<PathBuf>,
+        /// Record a new anchor; requires both sides already agree
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -1203,6 +1227,40 @@ fn run() -> Result<()> {
                     )
                 }
             }
+            Some(PlanCmd::Linear { cmd }) => {
+                let w = resolve()?;
+                ensure_coordination_enabled(&w)?;
+                let session_id = session_id(session)?;
+                match cmd {
+                    PlanLinearCmd::Export => {
+                        let export = plan::linear_export(&w, &session_id)?;
+                        if json {
+                            serde_json::to_string(&export)?
+                        } else {
+                            serde_json::to_string_pretty(&export)?
+                        }
+                    }
+                    PlanLinearCmd::Link { file } => {
+                        let input =
+                            read_input_file_or_stdin(file.as_deref(), MAX_PLAN_INPUT_BYTES)?;
+                        let snapshot = plan::linear_link(&w, &session_id, &input)?;
+                        if json {
+                            serde_json::to_string(&snapshot)?
+                        } else {
+                            format!(
+                                "Linked Linear Project to plan '{}' in session '{}'.",
+                                snapshot.title, snapshot.session.id
+                            )
+                        }
+                    }
+                    PlanLinearCmd::Reconcile { file, confirm } => {
+                        let input =
+                            read_input_file_or_stdin(file.as_deref(), MAX_PLAN_INPUT_BYTES)?;
+                        let result = plan::linear_reconcile(&w, &session_id, &input, confirm)?;
+                        format_serialized(&result, json)?
+                    }
+                }
+            }
             Some(PlanCmd::Archive {
                 summary,
                 allow_incomplete,
@@ -1793,6 +1851,27 @@ mod input_tests {
             cli.cmd,
             Cmd::Plan {
                 cmd: Some(PlanCmd::Update { .. }),
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wookie",
+            "plan",
+            "linear",
+            "reconcile",
+            "observed.toml",
+            "--confirm",
+            "--session",
+            "session-2026-07-25-example",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Plan {
+                cmd: Some(PlanCmd::Linear {
+                    cmd: PlanLinearCmd::Reconcile { confirm: true, .. }
+                }),
                 ..
             }
         ));

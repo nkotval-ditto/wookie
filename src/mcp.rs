@@ -387,6 +387,41 @@ fn tool_defs() -> Vec<Value> {
             }))),
         }),
         json!({
+            "name": "plan_linear_export",
+            "description": "Export a deterministic Linear Project and issue manifest for the attached plan. The agent performs provider writes through Linear MCP.",
+            "inputSchema": schema(&["session"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+            }))),
+        }),
+        json!({
+            "name": "plan_linear_link",
+            "description": "Persist the complete Linear Project and segment-to-issue mapping as an immutable plan link after Linear MCP creation succeeds.",
+            "inputSchema": schema(&["session", "link"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "link": {
+                    "type": "string",
+                    "maxLength": MAX_PLAN_INPUT_BYTES,
+                    "description": "Complete wookie.plan-linear-link/v1 TOML document."
+                },
+            }))),
+        }),
+        json!({
+            "name": "plan_linear_reconcile",
+            "description": "Compare a complete semantic Linear status observation with Wookie and the last sync anchor. With confirm=true, record a new anchor only when both sides already agree.",
+            "inputSchema": schema(&["session", "observation"], wiki_props(json!({
+                "session": { "type": "string", "maxLength": 96 },
+                "observation": {
+                    "type": "string",
+                    "maxLength": MAX_PLAN_INPUT_BYTES,
+                    "description": "Complete wookie.plan-linear-observation/v1 TOML document."
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Record the converged observation as the new sync anchor."
+                },
+            }))),
+        }),
+        json!({
             "name": "plan_archive",
             "description": "Finalize a plan archive receipt and close its session. Incomplete plans are refused unless explicitly allowed.",
             "inputSchema": schema(&["session"], wiki_props(json!({
@@ -990,6 +1025,33 @@ fn call_tool(name: &str, args: &Value) -> Result<String> {
                 plan::SnapshotOptions::default(),
             )?)?)
         }
+        "plan_linear_export" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::linear_export(
+                &w,
+                &require("session")?,
+            )?)?)
+        }
+        "plan_linear_link" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::linear_link(
+                &w,
+                &require("session")?,
+                &require("link")?,
+            )?)?)
+        }
+        "plan_linear_reconcile" => {
+            let w = resolve()?;
+            coordination_enabled(&w)?;
+            Ok(serde_json::to_string(&plan::linear_reconcile(
+                &w,
+                &require("session")?,
+                &require("observation")?,
+                bool_arg(args, "confirm", false)?,
+            )?)?)
+        }
         "plan_archive" => {
             let w = resolve()?;
             coordination_enabled(&w)?;
@@ -1589,6 +1651,15 @@ mod tests {
             }),
         )
         .unwrap();
+        validate_tool_args(
+            "plan_linear_reconcile",
+            &json!({
+                "session": "session-20260725-example",
+                "observation": "schema = \"wookie.plan-linear-observation/v1\"",
+                "confirm": false
+            }),
+        )
+        .unwrap();
         assert!(validate_tool_args(
             "plan_update",
             &json!({
@@ -1603,6 +1674,14 @@ mod tests {
             &json!({
                 "session": "session-20260725-example",
                 "definition": "x".repeat(MAX_PLAN_INPUT_BYTES + 1)
+            })
+        )
+        .is_err());
+        assert!(validate_tool_args(
+            "plan_linear_link",
+            &json!({
+                "session": "session-20260725-example",
+                "link": "x".repeat(MAX_PLAN_INPUT_BYTES + 1)
             })
         )
         .is_err());

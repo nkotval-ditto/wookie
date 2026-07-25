@@ -87,6 +87,9 @@ tools mirror the CLI:
 | `plan_snapshot` | `wookie plan show` |
 | `plan_update` | `wookie plan update` |
 | `plan_log` | `wookie plan log` |
+| `plan_linear_export` | `wookie plan linear export` |
+| `plan_linear_link` | `wookie plan linear link` |
+| `plan_linear_reconcile` | `wookie plan linear reconcile` |
 | `plan_archive` | `wookie plan archive` |
 | `notify` | `wookie notify` |
 | `notifications` | `wookie notifications` |
@@ -101,6 +104,13 @@ Plan tools follow the same rule. `plan_check` and `plan_attach` accept the TOML
 definition as data; `plan_update`, `plan_log`, and `plan_archive` append the
 same typed records as their CLI equivalents. Starting the localhost board is
 an operator-facing CLI action rather than an MCP tool.
+
+Linear plan tools deliberately do not call Linear. `plan_linear_export`
+returns a deterministic creation manifest, the agent creates or updates the
+Project and issues through Linear MCP, `plan_linear_link` records the complete
+immutable mapping, and `plan_linear_reconcile` previews or confirms semantic
+status synchronization. This keeps provider credentials outside Wookie and
+turns conflicts into explicit work rather than last-writer-wins updates.
 
 Example publication:
 

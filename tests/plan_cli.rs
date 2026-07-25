@@ -159,6 +159,27 @@ depends_on = ["design"]
 "#
 }
 
+fn linear_link() -> &'static str {
+    r#"schema = "wookie.plan-linear-link/v1"
+
+[project]
+id = "project-plan-test"
+url = "https://linear.app/example/project/plan-test"
+
+[[issues]]
+segment_id = "design"
+id = "TEST-1"
+url = "https://linear.app/example/issue/TEST-1/design"
+status = "todo"
+
+[[issues]]
+segment_id = "implementation"
+id = "TEST-2"
+url = "https://linear.app/example/issue/TEST-2/implementation"
+status = "todo"
+"#
+}
+
 fn segment<'a>(snapshot: &'a Value, id: &str) -> &'a Value {
     snapshot["segments"]
         .as_array()
@@ -509,6 +530,11 @@ fn plan_board_is_loopback_read_only_and_sends_security_headers() {
     env.initialize("plan-board");
     let session = env.start_session();
     env.ok(&["plan", "attach"], Some(valid_plan()), Some(&session));
+    env.ok(
+        &["plan", "linear", "link"],
+        Some(linear_link()),
+        Some(&session),
+    );
 
     let mut command = env.command(&["plan", "--no-open", "--port", "0"], Some(&session));
     command.stderr(Stdio::inherit());
@@ -538,7 +564,9 @@ fn plan_board_is_loopback_read_only_and_sends_security_headers() {
     let index = get(authority, "/", "");
     assert_eq!(index.status, 200);
     assert_security_headers(&index);
-    assert!(String::from_utf8(index.body).unwrap().contains("Wookie"));
+    let index_html = String::from_utf8(index.body).unwrap();
+    assert!(index_html.contains("Wookie"));
+    assert!(index_html.contains("linear-project"));
 
     let snapshot = get(authority, "/api/snapshot", "");
     assert_eq!(snapshot.status, 200);
@@ -546,6 +574,11 @@ fn plan_board_is_loopback_read_only_and_sends_security_headers() {
     let snapshot_json: Value = serde_json::from_slice(&snapshot.body).unwrap();
     assert_eq!(snapshot_json["schema"], "wookie.plan-snapshot/v1");
     assert_eq!(snapshot_json["session"]["id"], session);
+    assert_eq!(
+        snapshot_json["linear"]["project"]["id"],
+        "project-plan-test"
+    );
+    assert_eq!(snapshot_json["linear"]["issues"][0]["id"], "TEST-1");
     let etag = snapshot.headers.get("etag").unwrap();
 
     let not_modified = get(

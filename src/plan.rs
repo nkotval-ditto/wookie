@@ -18,6 +18,10 @@ pub const PLAN_SCHEMA: &str = "wookie.plan/v1";
 pub const PLAN_EVENT_SCHEMA: &str = "wookie.plan-event/v1";
 pub const PLAN_SNAPSHOT_SCHEMA: &str = "wookie.plan-snapshot/v1";
 pub const PLAN_ARCHIVE_SCHEMA: &str = "wookie.plan-archive/v1";
+pub const PLAN_LINEAR_EXPORT_SCHEMA: &str = "wookie.plan-linear-export/v1";
+pub const PLAN_LINEAR_LINK_SCHEMA: &str = "wookie.plan-linear-link/v1";
+pub const PLAN_LINEAR_OBSERVATION_SCHEMA: &str = "wookie.plan-linear-observation/v1";
+pub const PLAN_LINEAR_SYNC_SCHEMA: &str = "wookie.plan-linear-sync/v1";
 
 pub const MAX_PLAN_BYTES: usize = 256 * 1024;
 pub const MAX_PLAN_SEGMENTS: usize = 128;
@@ -37,6 +41,7 @@ const MAX_PLAN_GUIDE_BYTES: usize = 512 * 1024;
 const MAX_PLAN_GUIDE_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARCHIVE_MARKDOWN_BYTES: usize = 10 * 1024 * 1024;
 const PLAN_FILE: &str = "plan.toml";
+const LINEAR_FILE: &str = "linear.toml";
 const ARCHIVE_FILE: &str = "archive.md";
 
 #[derive(
@@ -132,6 +137,131 @@ pub struct PlanSegmentSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct PlanLinearExportIssue {
+    pub segment_id: String,
+    pub title: String,
+    pub description: String,
+    pub status: PlanStatus,
+    pub blocked_by_segment_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PlanLinearExport {
+    pub schema: &'static str,
+    pub session_id: String,
+    pub plan_sha256: String,
+    pub project_name: String,
+    pub project_summary: String,
+    pub project_description: String,
+    pub issues: Vec<PlanLinearExportIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearProject {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearIssue {
+    pub segment_id: String,
+    pub id: String,
+    pub url: String,
+    pub status: PlanStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearLinkInput {
+    pub schema: String,
+    pub project: PlanLinearProject,
+    pub issues: Vec<PlanLinearIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearLink {
+    pub schema: String,
+    pub plan_sha256: String,
+    pub project: PlanLinearProject,
+    pub issues: Vec<PlanLinearIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearObservedIssue {
+    pub segment_id: String,
+    pub status: PlanStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearObservation {
+    pub schema: String,
+    pub issues: Vec<PlanLinearObservedIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinearSyncRecord {
+    pub schema: String,
+    pub plan_sha256: String,
+    pub link_sha256: String,
+    pub issues: Vec<PlanLinearObservedIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanLinearTarget {
+    Wookie,
+    Linear,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlanLinearAction {
+    pub target: PlanLinearTarget,
+    pub segment_id: String,
+    pub issue_id: String,
+    pub from_status: PlanStatus,
+    pub to_status: PlanStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlanLinearConflict {
+    pub segment_id: String,
+    pub issue_id: String,
+    pub last_synced_status: PlanStatus,
+    pub wookie_status: PlanStatus,
+    pub linear_status: PlanStatus,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PlanLinearSnapshot {
+    pub link_sha256: String,
+    pub sync_sha256: String,
+    pub project: PlanLinearProject,
+    pub issues: Vec<PlanLinearIssue>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PlanLinearReconciliation {
+    pub schema: &'static str,
+    pub session_id: String,
+    pub plan_sha256: String,
+    pub link_sha256: String,
+    pub prior_sync_sha256: String,
+    pub observation_sha256: String,
+    pub actions: Vec<PlanLinearAction>,
+    pub conflicts: Vec<PlanLinearConflict>,
+    pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct PlanSnapshot {
     pub schema: &'static str,
     pub plan_schema: String,
@@ -139,6 +269,8 @@ pub struct PlanSnapshot {
     pub title: String,
     pub session: Session,
     pub segments: Vec<PlanSegmentSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<PlanLinearSnapshot>,
     /// Chronological tail of the complete session activity stream.
     pub events: Vec<ActivityEvent>,
     pub events_total: usize,
@@ -687,7 +819,7 @@ fn fold_statuses(
                 }
                 statuses.insert(segment_id.to_string(), to);
             }
-            "log" | "archived" => {
+            "log" | "linear-linked" | "linear-synced" | "archived" => {
                 if attached == 0 {
                     bail!(
                         "plan activity '{}' precedes the immutable plan attachment",
@@ -727,7 +859,311 @@ fn validate_snapshot_options(options: &SnapshotOptions) -> Result<()> {
     Ok(())
 }
 
+fn validate_linear_url(name: &str, value: &str) -> Result<String> {
+    let value = clean_text(name, value, 4096)?;
+    if !value.starts_with("https://linear.app/") {
+        bail!("{name} must use an https://linear.app/ URL");
+    }
+    if value.contains(['?', '#']) {
+        bail!("{name} must not contain a query string or fragment");
+    }
+    Ok(value)
+}
+
+fn validate_linear_issues(
+    definition: &PlanDefinition,
+    issues: &mut Vec<PlanLinearIssue>,
+) -> Result<()> {
+    if issues.len() != definition.segments.len() {
+        bail!(
+            "Linear mapping must contain exactly one issue for each of the {} plan segments",
+            definition.segments.len()
+        );
+    }
+    let mut by_segment = BTreeMap::new();
+    let mut issue_ids = BTreeSet::new();
+    let mut issue_urls = BTreeSet::new();
+    for mut issue in std::mem::take(issues) {
+        if !valid_segment_id(&issue.segment_id) {
+            bail!("invalid Linear mapping segment id '{}'", issue.segment_id);
+        }
+        issue.id = clean_text("Linear issue id", &issue.id, 512)?;
+        issue.url = validate_linear_url("Linear issue URL", &issue.url)?;
+        if !issue_ids.insert(issue.id.clone()) {
+            bail!("duplicate Linear issue id '{}'", issue.id);
+        }
+        if !issue_urls.insert(issue.url.clone()) {
+            bail!("duplicate Linear issue URL '{}'", issue.url);
+        }
+        if by_segment.insert(issue.segment_id.clone(), issue).is_some() {
+            bail!("duplicate Linear mapping for a plan segment");
+        }
+    }
+    let expected = definition
+        .segments
+        .iter()
+        .map(|segment| segment.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let actual = by_segment
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if expected != actual {
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let unknown = actual.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "Linear mapping segment coverage mismatch (missing: {}; unknown: {})",
+            missing.join(", "),
+            unknown.join(", ")
+        );
+    }
+    *issues = definition
+        .segments
+        .iter()
+        .map(|segment| {
+            by_segment
+                .remove(&segment.id)
+                .expect("validated Linear mapping covers every segment")
+        })
+        .collect();
+    Ok(())
+}
+
+fn canonical_linear_link(
+    check: &PlanCheck,
+    input: &str,
+    statuses: &BTreeMap<String, PlanStatus>,
+) -> Result<(PlanLinearLink, String, String)> {
+    if input.is_empty() {
+        bail!("Linear link input is empty");
+    }
+    if input.len() > MAX_PLAN_BYTES {
+        bail!("Linear link input exceeds {MAX_PLAN_BYTES} bytes");
+    }
+    let mut input: PlanLinearLinkInput =
+        toml::from_str(input).context("parsing Wookie Linear link TOML")?;
+    if input.schema != PLAN_LINEAR_LINK_SCHEMA {
+        bail!("unsupported Linear link schema (expected {PLAN_LINEAR_LINK_SCHEMA})");
+    }
+    input.project.id = clean_text("Linear project id", &input.project.id, 512)?;
+    input.project.url = validate_linear_url("Linear project URL", &input.project.url)?;
+    validate_linear_issues(&check.definition, &mut input.issues)?;
+    for issue in &input.issues {
+        let current = statuses
+            .get(&issue.segment_id)
+            .expect("validated Linear mapping references a plan segment");
+        if issue.status != *current {
+            bail!(
+                "Linear issue for segment '{}' is {}, but Wookie is {}; link only after the two sides agree",
+                issue.segment_id,
+                issue.status,
+                current
+            );
+        }
+    }
+    let link = PlanLinearLink {
+        schema: PLAN_LINEAR_LINK_SCHEMA.into(),
+        plan_sha256: check.plan_hash.clone(),
+        project: input.project,
+        issues: input.issues,
+    };
+    let canonical = toml::to_string_pretty(&link).context("rendering canonical Linear link")?;
+    if canonical.len() > MAX_PLAN_BYTES {
+        bail!("canonical Linear link exceeds {MAX_PLAN_BYTES} bytes");
+    }
+    let hash = sha256_hex(canonical.as_bytes());
+    Ok((link, canonical, hash))
+}
+
+fn load_linear_link(
+    w: &Wiki,
+    session_id: &str,
+    check: &PlanCheck,
+) -> Result<(PlanLinearLink, String)> {
+    let path = sessions::session_file_path(w, session_id, LINEAR_FILE)?;
+    let raw = sessions::read_bounded_regular_utf8(
+        &path,
+        u64::try_from(MAX_PLAN_BYTES).unwrap_or(u64::MAX),
+        "session Linear link",
+    )
+    .with_context(|| format!("session '{session_id}' has no Linear link"))?;
+    let mut link: PlanLinearLink =
+        toml::from_str(&raw).context("parsing stored Wookie Linear link")?;
+    if link.schema != PLAN_LINEAR_LINK_SCHEMA || link.plan_sha256 != check.plan_hash {
+        bail!("stored Linear link does not belong to the immutable session plan");
+    }
+    link.project.id = clean_text("Linear project id", &link.project.id, 512)?;
+    link.project.url = validate_linear_url("Linear project URL", &link.project.url)?;
+    validate_linear_issues(&check.definition, &mut link.issues)?;
+    let canonical = toml::to_string_pretty(&link)?;
+    if canonical != raw {
+        bail!("stored Linear link is not canonical");
+    }
+    Ok((link, sha256_hex(raw.as_bytes())))
+}
+
+fn linear_sync_from_link(link: &PlanLinearLink, link_sha256: &str) -> PlanLinearSyncRecord {
+    PlanLinearSyncRecord {
+        schema: PLAN_LINEAR_SYNC_SCHEMA.into(),
+        plan_sha256: link.plan_sha256.clone(),
+        link_sha256: link_sha256.into(),
+        issues: link
+            .issues
+            .iter()
+            .map(|issue| PlanLinearObservedIssue {
+                segment_id: issue.segment_id.clone(),
+                status: issue.status,
+            })
+            .collect(),
+    }
+}
+
+fn canonical_sync(sync: &PlanLinearSyncRecord) -> Result<(String, String)> {
+    let canonical = toml::to_string_pretty(sync).context("rendering canonical Linear sync")?;
+    if canonical.len() > MAX_PLAN_BYTES {
+        bail!("canonical Linear sync exceeds {MAX_PLAN_BYTES} bytes");
+    }
+    let hash = sha256_hex(canonical.as_bytes());
+    Ok((canonical, hash))
+}
+
+fn load_latest_linear_sync(
+    w: &Wiki,
+    session_id: &str,
+    check: &PlanCheck,
+    events: &[ActivityEvent],
+    link: &PlanLinearLink,
+    link_sha256: &str,
+) -> Result<(PlanLinearSyncRecord, String)> {
+    let mut linked = 0_usize;
+    let mut latest = None;
+    for event in events {
+        let Some(plan) = &event.plan else {
+            continue;
+        };
+        match plan.kind.as_str() {
+            "linear-linked" => {
+                linked += 1;
+                if linked > 1 {
+                    bail!("session plan has duplicate Linear link activity");
+                }
+                if plan.linear_sha256.as_deref() != Some(link_sha256) {
+                    bail!("Linear link activity does not match the immutable link file");
+                }
+                latest = Some((
+                    linear_sync_from_link(link, link_sha256),
+                    link_sha256.to_string(),
+                ));
+            }
+            "linear-synced" => {
+                if linked != 1 {
+                    bail!("Linear sync activity precedes the Linear link");
+                }
+                let hash = plan
+                    .linear_sha256
+                    .as_deref()
+                    .context("Linear sync activity has no record hash")?;
+                let file_name = format!("linear-sync-{hash}.toml");
+                let path = sessions::session_file_path(w, session_id, &file_name)?;
+                let raw = sessions::read_bounded_regular_utf8(
+                    &path,
+                    u64::try_from(MAX_PLAN_BYTES).unwrap_or(u64::MAX),
+                    "session Linear sync",
+                )?;
+                if sha256_hex(raw.as_bytes()) != hash {
+                    bail!("Linear sync record hash mismatch");
+                }
+                let mut sync: PlanLinearSyncRecord =
+                    toml::from_str(&raw).context("parsing stored Linear sync")?;
+                if sync.schema != PLAN_LINEAR_SYNC_SCHEMA
+                    || sync.plan_sha256 != check.plan_hash
+                    || sync.link_sha256 != link_sha256
+                {
+                    bail!("Linear sync record does not belong to this plan and link");
+                }
+                if sync.issues.len() != check.definition.segments.len() {
+                    bail!("stored Linear sync does not cover every plan segment");
+                }
+                let mut by_segment = BTreeMap::new();
+                for issue in std::mem::take(&mut sync.issues) {
+                    if by_segment.insert(issue.segment_id.clone(), issue).is_some() {
+                        bail!("stored Linear sync repeats a plan segment");
+                    }
+                }
+                sync.issues = check
+                    .definition
+                    .segments
+                    .iter()
+                    .map(|segment| {
+                        by_segment.remove(&segment.id).with_context(|| {
+                            format!("stored Linear sync is missing segment '{}'", segment.id)
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if !by_segment.is_empty() {
+                    bail!("stored Linear sync references an unknown plan segment");
+                }
+                if toml::to_string_pretty(&sync)? != raw {
+                    bail!("stored Linear sync is not canonical");
+                }
+                latest = Some((sync, hash.to_string()));
+            }
+            _ => {}
+        }
+    }
+    if linked != 1 {
+        bail!("session plan requires exactly one Linear link activity; found {linked}");
+    }
+    latest.context("session plan has no Linear synchronization anchor")
+}
+
+fn load_linear_snapshot(
+    w: &Wiki,
+    session_id: &str,
+    check: &PlanCheck,
+    events: &[ActivityEvent],
+) -> Result<Option<PlanLinearSnapshot>> {
+    let path = sessions::session_file_path(w, session_id, LINEAR_FILE)?;
+    if !path.exists() {
+        if events.iter().any(|event| {
+            event
+                .plan
+                .as_ref()
+                .is_some_and(|plan| matches!(plan.kind.as_str(), "linear-linked" | "linear-synced"))
+        }) {
+            bail!("Linear plan activity exists without its immutable link file");
+        }
+        return Ok(None);
+    }
+    let (link, link_sha256) = load_linear_link(w, session_id, check)?;
+    let (sync, sync_sha256) =
+        load_latest_linear_sync(w, session_id, check, events, &link, &link_sha256)?;
+    let statuses = sync
+        .issues
+        .into_iter()
+        .map(|issue| (issue.segment_id, issue.status))
+        .collect::<BTreeMap<_, _>>();
+    let issues = link
+        .issues
+        .into_iter()
+        .map(|mut issue| {
+            issue.status = *statuses
+                .get(&issue.segment_id)
+                .expect("validated sync covers every linked issue");
+            issue
+        })
+        .collect();
+    Ok(Some(PlanLinearSnapshot {
+        link_sha256,
+        sync_sha256,
+        project: link.project,
+        issues,
+    }))
+}
+
 fn snapshot_from_parts(
+    w: &Wiki,
+    session_id: &str,
     check: PlanCheck,
     events: Vec<ActivityEvent>,
     show: sessions::SessionShowResult,
@@ -763,9 +1199,10 @@ fn snapshot_from_parts(
             }
         })
         .collect::<Vec<_>>();
+    let linear = load_linear_snapshot(w, session_id, &check, &events)?;
     let events_total = events.len();
     let events_omitted = events_total.saturating_sub(options.event_limit);
-    let events = events.into_iter().skip(events_omitted).collect();
+    let events = events.into_iter().skip(events_omitted).collect::<Vec<_>>();
     Ok(PlanSnapshot {
         schema: PLAN_SNAPSHOT_SCHEMA,
         plan_schema: check.definition.schema,
@@ -773,6 +1210,7 @@ fn snapshot_from_parts(
         title: check.title,
         session: show.session,
         segments,
+        linear,
         events,
         events_total,
         events_omitted,
@@ -797,7 +1235,7 @@ pub fn snapshot(w: &Wiki, session_id: &str, options: SnapshotOptions) -> Result<
             cursor: 0,
         },
     )?;
-    snapshot_from_parts(check, events, show, &options)
+    snapshot_from_parts(w, session_id, check, events, show, &options)
 }
 
 fn event_payload(kind: &str, plan_hash: &str) -> PlanActivityData {
@@ -816,6 +1254,7 @@ fn event_payload(kind: &str, plan_hash: &str) -> PlanActivityData {
         done_segments: None,
         incomplete_segments: None,
         allow_incomplete: None,
+        linear_sha256: None,
     }
 }
 
@@ -931,6 +1370,387 @@ fn current_state(
     let events = sessions::ordered_activity_events(w, session_id)?;
     let statuses = fold_statuses(&check.definition, &check.plan_hash, &events)?;
     Ok((check, events, statuses))
+}
+
+pub fn linear_export(w: &Wiki, session_id: &str) -> Result<PlanLinearExport> {
+    let (check, _, statuses) = current_state(w, session_id)?;
+    let issues = check
+        .definition
+        .segments
+        .iter()
+        .map(|segment| PlanLinearExportIssue {
+            segment_id: segment.id.clone(),
+            title: segment.title.clone(),
+            description: format!(
+                "{}\n\nArchitecture decisions:\n{}\n\nVerification: {}\n\nWookie guide: [[{}]]\nWookie plan: {}",
+                segment.justification,
+                segment
+                    .decisions
+                    .iter()
+                    .map(|decision| format!("- {decision}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                segment.verification,
+                segment.guide,
+                check.plan_hash,
+            ),
+            status: *statuses
+                .get(&segment.id)
+                .expect("validated plan includes every segment"),
+            blocked_by_segment_ids: segment.depends_on.clone(),
+        })
+        .collect();
+    Ok(PlanLinearExport {
+        schema: PLAN_LINEAR_EXPORT_SCHEMA,
+        session_id: session_id.into(),
+        plan_sha256: check.plan_hash,
+        project_name: check.title.clone(),
+        project_summary: format!("Wookie session plan: {}", check.title),
+        project_description: format!(
+            "Managed from Wookie session `{session_id}`.\n\nThe Wookie plan remains authoritative for architecture, dependencies, and its append-only audit trail. Linear is linked through an agent-mediated MCP workflow."
+        ),
+        issues,
+    })
+}
+
+pub fn linear_link(w: &Wiki, session_id: &str, raw: &str) -> Result<PlanSnapshot> {
+    let guard = w.acquire_mutation_guard()?;
+    let session = sessions::load_session(w, session_id)?;
+    if session.status != "active" {
+        bail!("session '{session_id}' is closed");
+    }
+    let (check, events, statuses) = current_state(w, session_id)?;
+    let (link, canonical, link_sha256) = canonical_linear_link(&check, raw, &statuses)?;
+    let path = sessions::session_file_path(w, session_id, LINEAR_FILE)?;
+    if path.exists() {
+        let (existing, existing_hash) = load_linear_link(w, session_id, &check)?;
+        if existing != link || existing_hash != link_sha256 {
+            bail!("session '{session_id}' already has a different immutable Linear link");
+        }
+        let matches = events
+            .iter()
+            .filter(|event| {
+                event.plan.as_ref().is_some_and(|plan| {
+                    plan.kind == "linear-linked"
+                        && plan.linear_sha256.as_deref() == Some(link_sha256.as_str())
+                })
+            })
+            .count();
+        if matches == 0 {
+            let mut payload = event_payload("linear-linked", &check.plan_hash);
+            payload.linear_sha256 = Some(link_sha256);
+            let activity = sessions::append_structured_activity_guarded(
+                w,
+                &guard,
+                session_id,
+                "plan-linear-linked",
+                None,
+                payload,
+            )?;
+            sessions::commit_session_paths_guarded(
+                w,
+                &guard,
+                &format!("wookie: finish linking Linear plan {session_id}"),
+                &[
+                    format!("sessions/{session_id}/{LINEAR_FILE}"),
+                    activity.history_path,
+                ],
+            )?;
+        } else if matches > 1 {
+            bail!("session '{session_id}' has duplicate Linear link activity");
+        }
+        drop(guard);
+        return snapshot(w, session_id, SnapshotOptions::default());
+    }
+    let history_path = sessions::write_immutable_session_file_guarded(
+        w,
+        &guard,
+        session_id,
+        LINEAR_FILE,
+        &canonical,
+    )?;
+    let mut payload = event_payload("linear-linked", &check.plan_hash);
+    payload.linear_sha256 = Some(link_sha256);
+    let activity = match sessions::append_structured_activity_guarded(
+        w,
+        &guard,
+        session_id,
+        "plan-linear-linked",
+        None,
+        payload,
+    ) {
+        Ok(activity) => activity,
+        Err(error) => {
+            if let Err(rollback) =
+                sessions::remove_session_file_guarded(w, &guard, session_id, LINEAR_FILE)
+            {
+                bail!("linking Linear failed: {error:#}; rollback also failed: {rollback:#}");
+            }
+            return Err(error);
+        }
+    };
+    sessions::commit_session_paths_guarded(
+        w,
+        &guard,
+        &format!("wookie: link Linear plan {session_id}"),
+        &[history_path, activity.history_path],
+    )?;
+    drop(guard);
+    snapshot(w, session_id, SnapshotOptions::default())
+}
+
+fn parse_linear_observation(
+    definition: &PlanDefinition,
+    raw: &str,
+) -> Result<(PlanLinearObservation, String)> {
+    if raw.is_empty() {
+        bail!("Linear observation input is empty");
+    }
+    if raw.len() > MAX_PLAN_BYTES {
+        bail!("Linear observation input exceeds {MAX_PLAN_BYTES} bytes");
+    }
+    let mut observation: PlanLinearObservation =
+        toml::from_str(raw).context("parsing Wookie Linear observation TOML")?;
+    if observation.schema != PLAN_LINEAR_OBSERVATION_SCHEMA {
+        bail!("unsupported Linear observation schema (expected {PLAN_LINEAR_OBSERVATION_SCHEMA})");
+    }
+    if observation.issues.len() != definition.segments.len() {
+        bail!("Linear observation must cover every plan segment exactly once");
+    }
+    let mut by_segment = BTreeMap::new();
+    for issue in std::mem::take(&mut observation.issues) {
+        if !valid_segment_id(&issue.segment_id) {
+            bail!("invalid observed Linear segment id '{}'", issue.segment_id);
+        }
+        if by_segment.insert(issue.segment_id.clone(), issue).is_some() {
+            bail!("duplicate Linear observation for a plan segment");
+        }
+    }
+    observation.issues = definition
+        .segments
+        .iter()
+        .map(|segment| {
+            by_segment
+                .remove(&segment.id)
+                .with_context(|| format!("Linear observation is missing segment '{}'", segment.id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !by_segment.is_empty() {
+        bail!(
+            "Linear observation contains unknown segments: {}",
+            by_segment.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let canonical = toml::to_string_pretty(&observation)?;
+    Ok((observation, sha256_hex(canonical.as_bytes())))
+}
+
+pub fn linear_reconcile(
+    w: &Wiki,
+    session_id: &str,
+    raw: &str,
+    confirm: bool,
+) -> Result<PlanLinearReconciliation> {
+    let guard = confirm.then(|| w.acquire_mutation_guard()).transpose()?;
+    if confirm {
+        let session = sessions::load_session(w, session_id)?;
+        if session.status != "active" {
+            bail!("session '{session_id}' is closed");
+        }
+    }
+    let (check, events, statuses) = current_state(w, session_id)?;
+    let (link, link_sha256) = load_linear_link(w, session_id, &check)?;
+    let (prior, prior_sync_sha256) =
+        load_latest_linear_sync(w, session_id, &check, &events, &link, &link_sha256)?;
+    let (observation, observation_sha256) = parse_linear_observation(&check.definition, raw)?;
+    let prior = prior
+        .issues
+        .into_iter()
+        .map(|issue| (issue.segment_id, issue.status))
+        .collect::<BTreeMap<_, _>>();
+    let observed = observation
+        .issues
+        .iter()
+        .map(|issue| (issue.segment_id.clone(), issue.status))
+        .collect::<BTreeMap<_, _>>();
+    let linked = link
+        .issues
+        .iter()
+        .map(|issue| (issue.segment_id.as_str(), issue.id.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut actions = Vec::new();
+    let mut conflicts = Vec::new();
+    for segment in &check.definition.segments {
+        let anchor = prior[&segment.id];
+        let wookie_status = statuses[&segment.id];
+        let linear_status = observed[&segment.id];
+        let issue_id = linked[segment.id.as_str()].to_string();
+        if wookie_status == linear_status {
+            continue;
+        }
+        if wookie_status == anchor {
+            let blocked_by = if matches!(linear_status, PlanStatus::Doing | PlanStatus::Done) {
+                segment
+                    .depends_on
+                    .iter()
+                    .filter(|dependency| statuses.get(*dependency) != Some(&PlanStatus::Done))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            if blocked_by.is_empty() {
+                actions.push(PlanLinearAction {
+                    target: PlanLinearTarget::Wookie,
+                    segment_id: segment.id.clone(),
+                    issue_id,
+                    from_status: wookie_status,
+                    to_status: linear_status,
+                });
+            } else {
+                conflicts.push(PlanLinearConflict {
+                    segment_id: segment.id.clone(),
+                    issue_id,
+                    last_synced_status: anchor,
+                    wookie_status,
+                    linear_status,
+                    reason: format!(
+                        "Linear requests a Wookie transition blocked by incomplete dependencies: {}",
+                        blocked_by.join(", ")
+                    ),
+                });
+            }
+        } else if linear_status == anchor {
+            actions.push(PlanLinearAction {
+                target: PlanLinearTarget::Linear,
+                segment_id: segment.id.clone(),
+                issue_id,
+                from_status: linear_status,
+                to_status: wookie_status,
+            });
+        } else {
+            conflicts.push(PlanLinearConflict {
+                segment_id: segment.id.clone(),
+                issue_id,
+                last_synced_status: anchor,
+                wookie_status,
+                linear_status,
+                reason: "Wookie and Linear changed differently since the last sync anchor".into(),
+            });
+        }
+    }
+    if confirm && (!actions.is_empty() || !conflicts.is_empty()) {
+        bail!(
+            "cannot confirm Linear synchronization while {} action(s) and {} conflict(s) remain",
+            actions.len(),
+            conflicts.len()
+        );
+    }
+    let mut sync_sha256 = None;
+    if confirm {
+        let sync = PlanLinearSyncRecord {
+            schema: PLAN_LINEAR_SYNC_SCHEMA.into(),
+            plan_sha256: check.plan_hash.clone(),
+            link_sha256: link_sha256.clone(),
+            issues: observation.issues,
+        };
+        let (canonical, hash) = canonical_sync(&sync)?;
+        if hash != prior_sync_sha256 {
+            let guard = guard
+                .as_ref()
+                .expect("confirming Linear synchronization holds the mutation guard");
+            let file_name = format!("linear-sync-{hash}.toml");
+            let file_path = sessions::session_file_path(w, session_id, &file_name)?;
+            let (history_path, created) = if file_path.exists() {
+                let existing = sessions::read_bounded_regular_utf8(
+                    &file_path,
+                    u64::try_from(MAX_PLAN_BYTES).unwrap_or(u64::MAX),
+                    "session Linear sync",
+                )?;
+                if existing != canonical {
+                    bail!("session '{session_id}' has a conflicting Linear sync record");
+                }
+                (format!("sessions/{session_id}/{file_name}"), false)
+            } else {
+                (
+                    sessions::write_immutable_session_file_guarded(
+                        w, guard, session_id, &file_name, &canonical,
+                    )?,
+                    true,
+                )
+            };
+            let existing_events = events
+                .iter()
+                .filter(|event| {
+                    event.plan.as_ref().is_some_and(|plan| {
+                        plan.kind == "linear-synced"
+                            && plan.linear_sha256.as_deref() == Some(hash.as_str())
+                    })
+                })
+                .count();
+            if existing_events > 1 {
+                bail!("session '{session_id}' has duplicate Linear sync activity");
+            }
+            if existing_events == 1 {
+                sync_sha256 = Some(hash);
+                return Ok(PlanLinearReconciliation {
+                    schema: PLAN_LINEAR_SYNC_SCHEMA,
+                    session_id: session_id.into(),
+                    plan_sha256: check.plan_hash,
+                    link_sha256,
+                    prior_sync_sha256,
+                    observation_sha256,
+                    actions,
+                    conflicts,
+                    confirmed: true,
+                    sync_sha256,
+                });
+            }
+            let mut payload = event_payload("linear-synced", &check.plan_hash);
+            payload.linear_sha256 = Some(hash.clone());
+            let activity = match sessions::append_structured_activity_guarded(
+                w,
+                guard,
+                session_id,
+                "plan-linear-synced",
+                None,
+                payload,
+            ) {
+                Ok(activity) => activity,
+                Err(error) => {
+                    if created {
+                        if let Err(rollback) =
+                            sessions::remove_session_file_guarded(w, guard, session_id, &file_name)
+                        {
+                            bail!(
+                                "confirming Linear synchronization failed: {error:#}; rollback also failed: {rollback:#}"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            sessions::commit_session_paths_guarded(
+                w,
+                guard,
+                &format!("wookie: confirm Linear synchronization {session_id}"),
+                &[history_path, activity.history_path],
+            )?;
+        }
+        sync_sha256 = Some(hash);
+    }
+    Ok(PlanLinearReconciliation {
+        schema: PLAN_LINEAR_SYNC_SCHEMA,
+        session_id: session_id.into(),
+        plan_sha256: check.plan_hash,
+        link_sha256,
+        prior_sync_sha256,
+        observation_sha256,
+        actions,
+        conflicts,
+        confirmed: confirm,
+        sync_sha256,
+    })
 }
 
 pub fn update(
@@ -2140,5 +2960,139 @@ depends_on = ["design"]
         assert!(markdown.contains("\\!\\["));
         assert!(markdown.contains("&lt;img"));
         assert!(markdown.contains("Done."));
+    }
+
+    fn linear_link_toml(design: &str, build: &str) -> String {
+        format!(
+            r#"schema = "wookie.plan-linear-link/v1"
+
+[project]
+id = "project-1"
+url = "https://linear.app/example/project/wookie"
+
+[[issues]]
+segment_id = "design"
+id = "WOO-1"
+url = "https://linear.app/example/issue/WOO-1/design"
+status = "{design}"
+
+[[issues]]
+segment_id = "build"
+id = "WOO-2"
+url = "https://linear.app/example/issue/WOO-2/build"
+status = "{build}"
+"#
+        )
+    }
+
+    fn linear_observation(design: &str, build: &str) -> String {
+        format!(
+            r#"schema = "wookie.plan-linear-observation/v1"
+
+[[issues]]
+segment_id = "design"
+status = "{design}"
+
+[[issues]]
+segment_id = "build"
+status = "{build}"
+"#
+        )
+    }
+
+    #[test]
+    fn linear_bridge_exports_links_reconciles_and_confirms() {
+        let fixture = Fixture::new();
+        attach(&fixture.wiki, &fixture.session.id, plan()).unwrap();
+
+        let export = linear_export(&fixture.wiki, &fixture.session.id).unwrap();
+        assert_eq!(export.schema, PLAN_LINEAR_EXPORT_SCHEMA);
+        assert_eq!(export.issues.len(), 2);
+        assert_eq!(export.issues[1].blocked_by_segment_ids, ["design"]);
+
+        let linked = linear_link(
+            &fixture.wiki,
+            &fixture.session.id,
+            &linear_link_toml("todo", "todo"),
+        )
+        .unwrap();
+        assert_eq!(linked.linear.as_ref().unwrap().project.id, "project-1");
+        assert_eq!(linked.linear.as_ref().unwrap().issues[0].id, "WOO-1");
+
+        update(
+            &fixture.wiki,
+            &fixture.session.id,
+            "design",
+            PlanStatus::Doing,
+            None,
+        )
+        .unwrap();
+        let preview = linear_reconcile(
+            &fixture.wiki,
+            &fixture.session.id,
+            &linear_observation("todo", "todo"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.actions.len(), 1);
+        assert_eq!(preview.actions[0].target, PlanLinearTarget::Linear);
+        assert!(linear_reconcile(
+            &fixture.wiki,
+            &fixture.session.id,
+            &linear_observation("todo", "todo"),
+            true,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("cannot confirm"));
+
+        let confirmed = linear_reconcile(
+            &fixture.wiki,
+            &fixture.session.id,
+            &linear_observation("doing", "todo"),
+            true,
+        )
+        .unwrap();
+        assert!(confirmed.confirmed);
+        assert!(confirmed.sync_sha256.is_some());
+
+        let pull = linear_reconcile(
+            &fixture.wiki,
+            &fixture.session.id,
+            &linear_observation("done", "todo"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(pull.actions.len(), 1);
+        assert_eq!(pull.actions[0].target, PlanLinearTarget::Wookie);
+        assert_eq!(pull.actions[0].to_status, PlanStatus::Done);
+    }
+
+    #[test]
+    fn linear_link_rejects_unsafe_incomplete_and_divergent_mappings() {
+        let fixture = Fixture::new();
+        attach(&fixture.wiki, &fixture.session.id, plan()).unwrap();
+        let unsafe_url =
+            linear_link_toml("todo", "todo").replace("https://linear.app/", "javascript:");
+        assert!(linear_link(&fixture.wiki, &fixture.session.id, &unsafe_url)
+            .unwrap_err()
+            .to_string()
+            .contains("https://linear.app/"));
+
+        let incomplete = linear_link_toml("todo", "todo")
+            .split("[[issues]]")
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("[[issues]]");
+        assert!(linear_link(&fixture.wiki, &fixture.session.id, &incomplete)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one issue"));
+
+        let divergent = linear_link_toml("doing", "todo");
+        assert!(linear_link(&fixture.wiki, &fixture.session.id, &divergent)
+            .unwrap_err()
+            .to_string()
+            .contains("only after the two sides agree"));
     }
 }

@@ -135,6 +135,85 @@ The activity rail shows the Wookie-recorded timeline.
 > through Wookie. It cannot show private model reasoning or arbitrary shell and
 > editor actions that no agent logged.
 
+## Link a plan to a Linear epic
+
+Wookie can map one plan to a Linear Project (the epic) and one issue per
+segment without storing Linear credentials or calling Linear itself. The
+active agent bridges Wookie MCP and Linear MCP:
+
+```sh
+wookie --json plan linear export
+```
+
+The export contains a Project name/summary/description and ordered issue
+manifests with stable segment ids, semantic statuses, descriptions, and
+dependency keys. The agent creates the Project and issues through Linear MCP,
+adds blocking relationships, then gives Wookie the complete result:
+
+```toml
+schema = "wookie.plan-linear-link/v1"
+
+[project]
+id = "project-id-or-slug"
+url = "https://linear.app/acme/project/retry-redesign"
+
+[[issues]]
+segment_id = "confirm-boundaries"
+id = "ENG-101"
+url = "https://linear.app/acme/issue/ENG-101/confirm-boundaries"
+status = "doing"
+
+[[issues]]
+segment_id = "implement-policy"
+id = "ENG-102"
+url = "https://linear.app/acme/issue/ENG-102/implement-policy"
+status = "todo"
+```
+
+```sh
+wookie plan linear link linear-link.toml
+```
+
+Linking succeeds only when every segment has one unique issue and the supplied
+semantic status already agrees with Wookie. The Project and issue mapping is
+immutable. Identical retries are idempotent; remapping fails closed. The board
+then shows the epic and per-card issue links.
+
+Progress synchronization is explicit and two-phase. First, the agent reads
+each linked issue through Linear MCP, maps the team's concrete workflow state
+to `todo`, `doing`, `blocked`, or `done`, and previews reconciliation:
+
+```toml
+schema = "wookie.plan-linear-observation/v1"
+
+[[issues]]
+segment_id = "confirm-boundaries"
+status = "done"
+
+[[issues]]
+segment_id = "implement-policy"
+status = "todo"
+```
+
+```sh
+wookie --json plan linear reconcile linear-observation.toml
+```
+
+The result proposes Linear updates when only Wookie changed, Wookie updates
+when only Linear changed, and conflicts when both changed differently from the
+last anchor. The agent executes proposed provider writes through Linear MCP
+and Wookie writes through `plan update`. After both sides agree, it records the
+new immutable anchor:
+
+```sh
+wookie --json plan linear reconcile linear-observation.toml --confirm
+```
+
+Confirmation never performs a hidden provider mutation. This preserves normal
+Wookie dependency checks, keeps Linear access in the user's MCP connection,
+and makes partial failures recoverable by rerunning preview after observing
+both sides again.
+
 ## Finish and retain the record
 
 Archive after every segment is done:
@@ -230,8 +309,8 @@ users.
 
 ## JSON and MCP
 
-Add global `--json` to `guide`, `check`, `attach`, `show`, `update`, `log`, or
-`archive` for stable structured CLI output:
+Add global `--json` to `guide`, `check`, `attach`, `show`, `update`, `log`,
+`linear`, or `archive` for stable structured CLI output:
 
 ```sh
 wookie --json plan check plan.toml
@@ -253,6 +332,9 @@ The stdio server exposes the same non-UI workflow:
 | `plan_snapshot` | `wookie plan show` |
 | `plan_update` | `wookie plan update` |
 | `plan_log` | `wookie plan log` |
+| `plan_linear_export` | `wookie plan linear export` |
+| `plan_linear_link` | `wookie plan linear link` |
+| `plan_linear_reconcile` | `wookie plan linear reconcile` |
 | `plan_archive` | `wookie plan archive` |
 
 MCP calls take an explicit `session` because they do not inherit a client's
@@ -264,7 +346,8 @@ the open board observes their changes on its next poll.
 
 Plans reuse Wookie pages for durable implementation guidance and sessions for
 operational history. There is no configurable workflow engine, drag-and-drop
-mutation API, separate database, background daemon, or arbitrary plugin code.
+mutation API, separate database, background daemon, embedded Linear client, or
+arbitrary plugin code.
 Fixed states make every plan immediately legible; immutable definitions and
 append-only events make the record explainable; guide links keep plan cards
 compact while the full knowledge remains one read away.

@@ -51,6 +51,13 @@ states with `wookie plan update`, record meaningful context with `wookie plan
 log`, then use `wookie plan archive` to preserve the completed record and close
 the session.
 
+To use Linear as the external epic view, `wookie plan linear export` produces a
+deterministic Project-and-issues manifest. An agent creates those records
+through Linear MCP, persists their complete mapping with `plan linear link`,
+and uses `plan linear reconcile` to preview or confirm semantic status
+alignment. Wookie stores no Linear credential and performs no hidden network
+write.
+
 After meaningful work, publish enough metadata for another agent to judge its
 relevance without opening the full notice:
 
@@ -260,6 +267,12 @@ timeline. There is no drag-and-drop write path: agents use `plan update` and
 Wookie-recorded activity, not private model reasoning or arbitrary shell/editor
 actions.
 
+An optional Linear bridge maps the plan to one Linear Project and each segment
+to one issue. It remains agent-mediated: Wookie exports, validates, links, and
+reconciles semantic state while Linear MCP performs provider reads and writes.
+The board shows the persisted epic and issue links. There is no background
+sync daemon or embedded Linear credential.
+
 `wookie plan archive` requires every segment to be done unless
 `--allow-incomplete` is explicit. The final typed event records counts and
 receipt hashes and closes the session; a deterministic immutable `archive.md`
@@ -419,6 +432,8 @@ wookie session prune                  preview or apply retention cleanup
 wookie plan guide|check|attach        author and attach a validated plan
 wookie plan [--port N|--no-open]      open the read-only localhost board
 wookie plan show|update|log|archive   inspect, progress, and finish a plan
+wookie plan linear export|link|reconcile
+                                      bridge a plan to Linear through MCP
 wookie notify                         publish a notification
 wookie notifications                  poll and filter compact metadata
 wookie notification read|dismiss      acknowledge one notification
@@ -440,7 +455,9 @@ for every flag and filter.
 mirror page, wiki, plan, session, notification, critique, doctor, ingest, lock,
 and configuration operations. Tools that resolve a wiki accept optional
 `wiki` and `cwd` fields. Plan agents use `plan_guide`, `plan_check`,
-`plan_attach`, `plan_snapshot`, `plan_update`, `plan_log`, and `plan_archive`;
+`plan_attach`, `plan_snapshot`, `plan_update`, `plan_log`,
+`plan_linear_export`, `plan_linear_link`, `plan_linear_reconcile`, and
+`plan_archive`;
 the interactive browser launcher remains a local CLI operation.
 
 ```sh

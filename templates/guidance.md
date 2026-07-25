@@ -45,6 +45,9 @@ wookie plan attach plan.toml    # immutably attach it to WOOKIE_SESSION
 wookie plan                     # open the read-only live localhost board
 wookie plan update SEG STATUS   # append a meaningful segment transition
 wookie plan log --summary "..." # append a progress/decision/blocker/note
+wookie plan linear export       # manifest for a Linear Project + segment issues
+wookie plan linear link FILE    # persist the complete MCP-created mapping
+wookie plan linear reconcile FILE [--confirm] # preview/anchor shared progress
 wookie plan archive             # finish the plan and close the session
 wookie notify --summary "..."  # tell other sessions what changed
 wookie read <id> [--expand]    # read a page; --expand inlines linked summaries
@@ -215,6 +218,14 @@ and dependencies. Check, then attach the immutable definition. Record only
 real `todo`/`doing`/`blocked`/`done` transitions and meaningful logs. The board
 shows those Wookie records, not private reasoning or unlogged tool activity.
 Archive when complete to retain the record and close the session.
+
+When the user wants Linear linkage, keep the integration agent-mediated:
+export the manifest from Wookie, create the Project and issues with Linear MCP,
+then persist the complete mapping with `plan linear link`. Observe the linked
+issues through Linear MCP and use `plan linear reconcile` to preview actions.
+Apply Wookie transitions through `plan update`, Linear transitions through its
+MCP, and use `--confirm` only after both sides agree. Never put Linear tokens
+or credentials in Wookie.
 
 Notification listings intentionally contain only compact metadata. Judge
 relevance from the summary, kind, importance, and affected paths. Read relevant

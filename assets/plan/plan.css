@@ -519,6 +519,27 @@ button:focus-visible,
   color: var(--copper);
 }
 
+.card-linear {
+  position: absolute;
+  bottom: 0.82rem;
+  left: 0.82rem;
+  z-index: 2;
+  color: var(--teal);
+  font-family: var(--utility);
+  font-size: 0.6rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.card-linear:hover,
+.session-facts a:hover {
+  color: var(--copper);
+}
+
+.session-facts a {
+  color: inherit;
+}
+
 .dependency-note {
   display: flex;
   gap: 0.35rem;

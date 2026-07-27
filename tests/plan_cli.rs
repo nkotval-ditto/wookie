@@ -567,6 +567,19 @@ fn plan_board_is_loopback_read_only_and_sends_security_headers() {
     let index_html = String::from_utf8(index.body).unwrap();
     assert!(index_html.contains("Wookie"));
     assert!(index_html.contains("linear-project"));
+    assert!(index_html.contains(r#"name="color-scheme""#));
+    assert!(index_html.contains(r#"content="light""#));
+    assert!(!index_html.contains("connection-status"));
+
+    let stylesheet = get(authority, "/plan.css", "");
+    assert_eq!(stylesheet.status, 200);
+    assert_security_headers(&stylesheet);
+    let stylesheet = String::from_utf8(stylesheet.body).unwrap();
+    assert!(stylesheet.contains(r#""SFMono-Regular""#));
+    assert!(stylesheet.contains(r#".plan-card[data-status="todo"]"#));
+    assert!(stylesheet.contains(r#".plan-card[data-status="doing"]"#));
+    assert!(stylesheet.contains(r#".plan-card[data-status="blocked"]"#));
+    assert!(stylesheet.contains(r#".plan-card[data-status="done"]"#));
 
     let snapshot = get(authority, "/api/snapshot", "");
     assert_eq!(snapshot.status, 200);

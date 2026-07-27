@@ -19,8 +19,6 @@
     sessionProgress: document.getElementById("session-progress"),
     linearFact: document.getElementById("linear-fact"),
     linearProject: document.getElementById("linear-project"),
-    connectionStatus: document.getElementById("connection-status"),
-    connectionLabel: document.getElementById("connection-label"),
     stateBanner: document.getElementById("state-banner"),
     stateBannerTitle: document.getElementById("state-banner-title"),
     stateBannerDetail: document.getElementById("state-banner-detail"),
@@ -443,8 +441,7 @@
       openButton.append(dependencyNote);
     }
 
-    openButton.addEventListener("click", () => openSegment(segment, false));
-    card.append(openButton, guideButton);
+    const actions = createElement("div", "card-actions");
     if (segment.linearIssue?.url) {
       const linearLink = createElement(
         "a",
@@ -458,8 +455,12 @@
         "aria-label",
         `Open Linear issue for ${segment.title}`,
       );
-      card.append(linearLink);
+      actions.append(linearLink);
     }
+    actions.append(guideButton);
+
+    openButton.addEventListener("click", () => openSegment(segment, false));
+    card.append(openButton, actions);
     return card;
   }
 
@@ -786,17 +787,6 @@
     }
   }
 
-  function setConnection(mode, label) {
-    elements.connectionStatus.classList.remove(
-      "is-connecting",
-      "is-live",
-      "is-offline",
-      "is-closed",
-    );
-    elements.connectionStatus.classList.add(`is-${mode}`);
-    elements.connectionLabel.textContent = label;
-  }
-
   function showError(message, detail) {
     elements.stateBanner.hidden = false;
     elements.stateBannerTitle.textContent = message;
@@ -923,13 +913,11 @@
       if (response.status === 304) {
         state.failures = 0;
         hideError();
-        setConnection("live", "Live");
         return;
       }
       if (response.status === 410) {
         state.terminal = true;
         window.clearTimeout(state.timer);
-        setConnection("offline", "Unavailable");
         showError(
           "This plan is no longer available.",
           "It may have been removed or the local plan server may no longer have access to its session.",
@@ -957,14 +945,10 @@
       if (closedLabel) {
         state.terminal = true;
         elements.sessionKicker.textContent = `${closedLabel} session`;
-        setConnection("closed", closedLabel);
-      } else {
-        setConnection("live", "Live");
       }
     } catch (error) {
       state.failures += 1;
       const reconnecting = state.snapshot !== null;
-      setConnection("offline", reconnecting ? "Reconnecting" : "Offline");
       showError(
         reconnecting ? "Live updates paused." : "Unable to load this plan.",
         error instanceof Error
@@ -1156,6 +1140,5 @@
     state.selectedSegmentId = null;
   });
 
-  setConnection("connecting", "Connecting");
   pollSnapshot();
 })();
